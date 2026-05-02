@@ -3,8 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Mandelbrot (Rust + WASM)</title>
+    <title>Fractal Beauty</title>
+    <meta name="description" content="Fractal Beauty" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <!-- Open Graph / Twitter card. Paths are relative so previews work
+         regardless of the deploy URL. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Fractal Beauty" />
+    <meta property="og:image" content="./og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Fractal Beauty" />
+    <meta name="twitter:image" content="./og.png" />
     <style>
       :root { color-scheme: dark; }
       html, body { margin: 0; height: 100%; background: #111; color: #eee;
@@ -79,7 +90,7 @@
   </head>
   <body>
     <header>
-      <h1><span class="long">Mandelbrot Set</span><span class="short">Mandelbrot</span></h1>      <label>Fractal
+      <h1><span class="long">Fractal Beauty</span><span class="short">Fractal Beauty</span></h1>      <label>Fractal
         <select id="fractal">
           <option value="mandelbrot" selected>Mandelbrot</option>
           <option value="julia">Julia</option>
