@@ -38,12 +38,11 @@ fn two_sum(a: f32, b: f32) -> vec2f {
   let e = (a - opaque(opaque(s) - bb)) + (b - bb);
   return vec2f(s, e);
 }
-// Veltkamp split via bitcast: mask off the low 12 mantissa bits of the f32.
-// hi has 12 significant bits; lo = a - hi is exact (Sterbenz). Bitcast is
-// opaque so the compiler can't fold split(a) back into a.
+// Veltkamp split. Splitter (= 2^12 + 1 = 4097) comes from a uniform so the
+// compiler cannot constant-fold (t - (t - a)) back to a.
 fn split(a: f32) -> vec2f {
-  let bits = bitcast<u32>(a);
-  let hi = bitcast<f32>(bits & 0xfffff000u);
+  let t = u.splitter * a;
+  let hi = opaque(t - (t - a));
   let lo = a - hi;
   return vec2f(hi, lo);
 }
@@ -143,7 +142,6 @@ fn sample_at(fragxy: vec2f) -> vec3f {
       || (cxf0 + 1.0) * (cxf0 + 1.0) + cyf0 * cyf0 <= 0.0625) {
     return vec3f(0.0);
   }
-
   var iter: u32 = u.max_iter;
   var final_mag2: f32 = 0.0;
 
@@ -182,13 +180,6 @@ fn sample_at(fragxy: vec2f) -> vec3f {
     }
     final_mag2 = df_to_f32(df_add(zx2, zy2));
   }
-
-  // === DEBUG: visualize the lo part of iterated zx.
-  // If df survives the loop, zx_lo varies smoothly per pixel; if not, blocky.
-  let zx_hi = df_to_f32(zx);
-  let zx_lo = zx.x - zx_hi + zx.y;
-  let dbg = clamp(zx_lo * 1.0e5 + 0.5, 0.0, 1.0);
-  return vec3f(dbg, f32(iter) / 64.0, 0.0);
 
   if (iter >= u.max_iter) { return vec3f(0.0); }
 
