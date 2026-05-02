@@ -24,14 +24,12 @@ struct Uniforms {
   scale_y:    f32,   // half-height of the view in complex units (= scale)
   max_iter:   u32,
   ref_iters:  u32,   // length of the reference orbit (<= max_iter+1)
-  // (ref - view_centre) in complex coords. Added (negated) to per-pixel dc
+  // (ref - view_centre) in complex coords. Subtracted from per-pixel dc
   // so the perturbation is taken around the chosen reference, not the view
-  // centre. f32 is fine here because at deep zoom this is small (~ scale).
+  // centre. Computed in f64 on the CPU (Rust) before being cast to f32 —
+  // f32 is plenty for this small offset (|ref_off| <= scale).
   ref_off:    vec2f,
-  // The reference point itself, in absolute complex coords. Used by the
-  // post-perturbation f32 fallback so we can keep iterating if the
-  // reference orbit runs out before this pixel escapes.
-  ref_c:      vec2f,
+  _pad:       vec2f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> ref_orbit: array<vec2f>;
@@ -89,15 +87,18 @@ fn sample_at(fragxy: vec2f) -> vec3f {
 
   // If the reference orbit ran out before this pixel escaped, keep going
   // in plain f32 from the current true orbit position. c is reconstructed
-  // as ref_c + dc; this is f32-precise for moderate zooms (where the user
-  // typically navigates) and avoids the giant black-blob glitches that
-  // would otherwise appear wherever the reference dies young.
+  // as ref_c + dc, where ref_c = ref_orbit[1] (because Z_1 = Z_0^2 + c = c
+  // since Z_0 = 0). This is f32-precise for moderate zooms and avoids the
+  // black-blob glitches that would otherwise appear wherever the reference
+  // dies young; at extreme zoom the f32 ref_c is imprecise, but in that
+  // regime a good in-set reference normally prevents this branch firing.
   if (iter >= u.max_iter && u.ref_iters < u.max_iter) {
     let lastZ = ref_orbit[u.ref_iters - 1u];
+    let refC = ref_orbit[1u];
     var zx = lastZ.x + dzx;
     var zy = lastZ.y + dzy;
-    let cx = u.ref_c.x + dcx;
-    let cy = u.ref_c.y + dcy;
+    let cx = refC.x + dcx;
+    let cy = refC.y + dcy;
     for (var n: u32 = u.ref_iters; n < u.max_iter; n = n + 1u) {
       let zx2 = zx * zx;
       let zy2 = zy * zy;
@@ -200,16 +201,18 @@ export async function createWebGpuRenderer(canvas) {
 
   return {
     lastPrecision() { return "perturb"; },
-    render(width, height, cx, cy, scale, maxIter, refOrbit) {
+    render(width, height, cx, cy, scale, maxIter, refOrbit, refOffX, refOffY) {
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
         canvas.height = height;
       }
 
       const aspect = width / height;
-      // First two f32s of refOrbit are the chosen reference point (ref_cx, ref_cy).
-      const refCx = refOrbit[0];
-      const refCy = refOrbit[1];
+      // refOffX/refOffY are computed by the caller in f64 from the cached
+      // absolute reference point and the current view centre; doing it
+      // there (instead of reading the f32 ref_off baked into the orbit
+      // header) keeps precision when reusing a cached orbit across pans
+      // and zooms, which matters past ~scale 1e-7.
       const orbitData = refOrbit.subarray(2);
       const refIters = Math.min(REF_MAX, orbitData.length / 2);
 
@@ -219,13 +222,9 @@ export async function createWebGpuRenderer(canvas) {
       fView[3] = scale;          // scale_y
       uView[4] = maxIter | 0;
       uView[5] = refIters | 0;
-      // ref_off = ref - view_centre, in complex coords.
-      fView[6] = refCx - cx;
-      fView[7] = refCy - cy;
-      // ref_c = the actual reference point.
-      fView[8] = refCx;
-      fView[9] = refCy;
-      // fView[10], fView[11] = padding
+      fView[6] = refOffX;
+      fView[7] = refOffY;
+      // fView[8..11] = padding
       device.queue.writeBuffer(uniformBuf, 0, cpuUniform);
 
       // Upload reference orbit (clipped to REF_MAX).

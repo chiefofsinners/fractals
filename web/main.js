@@ -20,8 +20,11 @@ let webgpu = null; // populated asynchronously by boot()
 
 // Below this scale, f32 precision in the WebGL shader breaks down.
 const WEBGL_MIN_SCALE = 1e-5;
-// df64 ~= 48 bits of mantissa; below this scale, df64 also breaks down.
-const WEBGPU_MIN_SCALE = 1e-13;
+// Perturbation does the per-pixel work in f32 deltas around an f64
+// reference orbit, so its precision is bounded by f64 on the reference
+// (ulp ~ 2e-16 near unit magnitude). Below ~1e-15 the reference orbit
+// itself loses meaningful digits and we fall back to the f64 CPU path.
+const WEBGPU_MIN_SCALE = 1e-15;
 
 function activeBackend() {
   const want = rendererSelect.value;
@@ -111,21 +114,36 @@ function scheduleRefine() {
 // pick a different winner each time the view scrolled, making the image
 // flicker darker mid-zoom (more pixels falling through the f32 fallback)
 // and brighten again once motion settled on a stable choice.
-let cachedRef = null; // { cx, cy, triedMaxIter, orbit }
+//
+// We store `absCx`/`absCy` as f64 so that on every frame we can compute
+// `ref_off = absRef - view_centre` in f64 and only cast the (small) result
+// to f32 — essential beyond ~scale 1e-7, where naively reading the f32
+// reference coords back from the orbit buffer would jitter the perturbation
+// centre by orders of magnitude more than a pixel.
+let cachedRef = null; // { absCx, absCy, triedMaxIter, orbit }
 
 function getReferenceOrbit(cx, cy, scale, aspect, maxIter) {
   const halfX = scale * aspect;
   const halfY = scale;
   const inView = cachedRef
-    && cachedRef.cx >= cx - halfX && cachedRef.cx <= cx + halfX
-    && cachedRef.cy >= cy - halfY && cachedRef.cy <= cy + halfY;
+    && cachedRef.absCx >= cx - halfX && cachedRef.absCx <= cx + halfX
+    && cachedRef.absCy >= cy - halfY && cachedRef.absCy <= cy + halfY;
   // Reuse if the reference is still on screen *and* we've already searched
   // for the current iteration budget (or higher). If maxIter went up a
   // second search may turn up a longer reference, so it's worth one retry.
-  if (inView && cachedRef.triedMaxIter >= maxIter) return cachedRef.orbit;
-  const orbit = reference_orbit(cx, cy, scale, aspect, maxIter);
-  cachedRef = { cx: orbit[0], cy: orbit[1], triedMaxIter: maxIter, orbit };
-  return orbit;
+  if (!(inView && cachedRef.triedMaxIter >= maxIter)) {
+    const orbit = reference_orbit(cx, cy, scale, aspect, maxIter);
+    // Rust returns ref_off in the header (computed in f64 then cast). Add
+    // it to the *current* view centre in f64 to recover the absolute
+    // reference point; that's what we cache.
+    cachedRef = {
+      absCx: cx + orbit[0],
+      absCy: cy + orbit[1],
+      triedMaxIter: maxIter,
+      orbit,
+    };
+  }
+  return cachedRef;
 }
 
 function draw(quality = "high") {
@@ -156,8 +174,12 @@ function draw(quality = "high") {
     // darker mid-zoom (more pixels falling through the f32 fallback path)
     // and brighten back up once motion settled on a stable choice.
     const aspect = w / h;
-    const refOrbit = getReferenceOrbit(view.cx, view.cy, view.scale, aspect, maxIter);
-    webgpu.render(w, h, view.cx, view.cy, view.scale, maxIter, refOrbit);
+    const ref = getReferenceOrbit(view.cx, view.cy, view.scale, aspect, maxIter);
+    // Compute ref_off in f64 from the *current* view centre and the cached
+    // absolute reference; the GPU only ever sees the (small) f32 result.
+    const refOffX = ref.absCx - view.cx;
+    const refOffY = ref.absCy - view.cy;
+    webgpu.render(w, h, view.cx, view.cy, view.scale, maxIter, ref.orbit, refOffX, refOffY);
   } else {
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;

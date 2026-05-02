@@ -93,8 +93,12 @@ fn mandelbrot_iter(cx: f64, cy: f64, max_iter: u32) -> (u32, f64, f64) {
 }
 
 /// Compute a high-precision reference orbit for perturbation-theory
-/// rendering on the GPU. Returns header `[ref_cx, ref_cy]` followed by
-/// `[zx0, zy0, zx1, zy1, ...]`, all as f32. Iteration count = (len-2)/2.
+/// rendering on the GPU. Returns header `[ref_off_x, ref_off_y]` (the
+/// chosen reference point *expressed as an offset from the view centre*,
+/// computed in f64 then cast to f32 — this is what the GPU needs and
+/// preserves precision at deep zoom, where the absolute coords would lose
+/// ~6e-8 to f32 quantisation) followed by `[zx0, zy0, zx1, zy1, ...]`,
+/// all as f32. Iteration count = (len-2)/2.
 ///
 /// We probe a grid of candidate centres inside the view and pick the
 /// longest-lived orbit (preferring ones that hit `max_iter`, i.e. land
@@ -125,8 +129,9 @@ pub fn reference_orbit(cx: f64, cy: f64, scale: f64, aspect: f64, max_iter: u32)
     }
 
     let mut out: Vec<f32> = Vec::with_capacity(2 + 2 * (max_iter as usize + 1));
-    out.push(best_cx as f32);
-    out.push(best_cy as f32);
+    // Header: offset from the view centre, subtracted in f64.
+    out.push((best_cx - cx) as f32);
+    out.push((best_cy - cy) as f32);
 
     let mut zx = 0.0f64;
     let mut zy = 0.0f64;
