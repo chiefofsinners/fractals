@@ -92,6 +92,79 @@ fn mandelbrot_iter(cx: f64, cy: f64, max_iter: u32) -> (u32, f64, f64) {
     (max_iter, zx, zy)
 }
 
+/// Compute a high-precision reference orbit for perturbation-theory
+/// rendering on the GPU. Returns `[zx0, zy0, zx1, zy1, ...]` as f32s,
+/// with iteration count = `len() / 2`.
+///
+/// `cx, cy, scale, aspect` describe the view rectangle. We probe a small
+/// grid of candidate centres inside it and pick whichever yields the
+/// longest reference orbit, so that pixels in the deepest part of the
+/// view (typically near the boundary) have a long reference to perturb
+/// against. Returns the chosen `[ref_cx, ref_cy]` as the first two f32s,
+/// then the orbit values.
+#[wasm_bindgen]
+pub fn reference_orbit(cx: f64, cy: f64, scale: f64, aspect: f64, max_iter: u32) -> Vec<f32> {
+    // Candidate grid: 5x5 over the view.
+    let mut best_cx = cx;
+    let mut best_cy = cy;
+    let mut best_n = 0u32;
+    const GRID: i32 = 5;
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            // Map (gx, gy) → (-1..1, -1..1) inclusive
+            let ux = (gx as f64) / ((GRID - 1) as f64) * 2.0 - 1.0;
+            let uy = (gy as f64) / ((GRID - 1) as f64) * 2.0 - 1.0;
+            let pcx = cx + ux * scale * aspect;
+            let pcy = cy + uy * scale;
+            let n = orbit_length(pcx, pcy, max_iter);
+            if n > best_n {
+                best_n = n;
+                best_cx = pcx;
+                best_cy = pcy;
+            }
+        }
+    }
+
+    let mut out: Vec<f32> = Vec::with_capacity(2 + 2 * (max_iter as usize + 1));
+    // Header: chosen reference point (so JS can subtract it from the view centre
+    // to get the pixel-relative offset for the shader).
+    out.push(best_cx as f32);
+    out.push(best_cy as f32);
+
+    let mut zx = 0.0f64;
+    let mut zy = 0.0f64;
+    out.push(zx as f32);
+    out.push(zy as f32);
+    let bailout = (1u64 << 16) as f64;
+    for _ in 0..max_iter {
+        let zx2 = zx * zx;
+        let zy2 = zy * zy;
+        if zx2 + zy2 > bailout { break; }
+        let nzy = 2.0 * zx * zy + best_cy;
+        zx = zx2 - zy2 + best_cx;
+        zy = nzy;
+        out.push(zx as f32);
+        out.push(zy as f32);
+    }
+    out
+}
+
+#[inline]
+fn orbit_length(cx: f64, cy: f64, max_iter: u32) -> u32 {
+    let mut zx = 0.0f64;
+    let mut zy = 0.0f64;
+    let bailout = (1u64 << 16) as f64;
+    for i in 0..max_iter {
+        let zx2 = zx * zx;
+        let zy2 = zy * zy;
+        if zx2 + zy2 > bailout { return i; }
+        let nzy = 2.0 * zx * zy + cy;
+        zx = zx2 - zy2 + cx;
+        zy = nzy;
+    }
+    max_iter
+}
+
 /// Cosine-based color palette ("IQ palette"). `t` in [0, 1].
 #[inline]
 fn palette(t: f64) -> (u8, u8, u8) {

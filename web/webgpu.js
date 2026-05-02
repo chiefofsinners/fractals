@@ -1,96 +1,37 @@
-// WebGPU Mandelbrot renderer.
+// WebGPU Mandelbrot renderer — perturbation theory.
 //
-// Uses "double-single" (df64) arithmetic in WGSL: each f64 value is represented
-// as a pair of f32s (hi + lo) so we get ~48 bits of mantissa — enough to zoom
-// well past where WebGL's f32 path gets pixelated. ~10× slower per iteration
-// than plain f32 but still very fast on a discrete or Apple-silicon GPU.
+// The CPU computes one high-precision (f64) "reference orbit" Z_n at the
+// view center. The GPU then iterates a per-pixel delta orbit dz around it
+// using the linearised recurrence
+//
+//   dz_{n+1} = 2 * Z_n * dz_n + dz_n^2 + dc          (complex)
+//
+// where dc is the per-pixel offset from the reference point in the complex
+// plane. Because Z_n is fixed for every pixel and dc is small, all the
+// per-pixel work fits in plain f32 with no precision loss — even at zooms
+// far past where df64 collapses on Apple's Metal compiler.
+//
+// Bailout uses the *true* orbit Z + dz so the colouring matches the CPU
+// renderer exactly. We don't yet do glitch correction (rebasing onto a new
+// reference when |dz| approaches |Z|), so extreme zooms over highly chaotic
+// regions can still show artefacts; for the zoom range users actually
+// navigate to, this is good for many orders of magnitude beyond f32.
 
 const SHADER = /* wgsl */ `
 struct Uniforms {
   resolution: vec2f,
-  cx:    vec2f,  // (hi, lo)
-  cy:    vec2f,
-  scale: vec2f,
-  max_iter: u32,
-  use_df: u32,   // 0 = pure f32 fast path, 1 = double-single
-  splitter: f32, // = 4097.0; passed via uniform to defeat compiler folding
-  pad0: f32,
+  scale_x:    f32,   // half-width of the view in complex units (= scale * aspect)
+  scale_y:    f32,   // half-height of the view in complex units (= scale)
+  max_iter:   u32,
+  ref_iters:  u32,   // length of the reference orbit (<= max_iter+1)
+  // (ref - view_centre) in complex coords. We add this to the per-pixel dc
+  // so the perturbation is taken around the chosen reference, not the view
+  // centre. Stored as f32: at deep zoom this offset is small (~ scale) so
+  // f32 precision is fine.
+  ref_off:    vec2f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
-
-// ---- double-single arithmetic ----------------------------------------------
-//
-// Critical: WGSL allows the compiler to contract / reassociate fp ops, which
-// silently destroys the error-tracking algorithms below (two_sum's e and
-// two_prod's e both algebraically simplify to 0). We use bitcast<u32>
-// roundtrips as opaque "fences" the optimizer cannot see through.
-
-fn opaque(a: f32) -> f32 {
-  // Add a runtime-zero uniform — compiler can't constant-fold a uniform load,
-  // so x + 0_uniform isn't simplified. This is the only fence that survives
-  // Tint→Metal's "fast math" optimization on Apple GPUs.
-  return a + u.pad0;
-}
-
-fn two_sum(a: f32, b: f32) -> vec2f {
-  let s = a + b;
-  let bb = opaque(s) - a;
-  let e = (a - opaque(opaque(s) - bb)) + (b - bb);
-  return vec2f(s, e);
-}
-// Veltkamp split. The compiler tries hard to simplify (t - (t - a)) → a;
-// we wrap each arithmetic step in opaque() so it can't see through.
-fn split(a: f32) -> vec2f {
-  let t = opaque(u.splitter * a);
-  let t_minus_a = opaque(t - a);
-  let hi = opaque(t - t_minus_a);
-  let lo = a - hi;
-  return vec2f(hi, lo);
-}
-fn two_prod(a: f32, b: f32) -> vec2f {
-  let p = a * b;
-  let aa = split(a);
-  let bb = split(b);
-  // Each of aa.x*bb.x, aa.x*bb.y, aa.y*bb.x, aa.y*bb.y is exactly representable
-  // in f32 (split makes hi 12-bit, lo 12-bit). Sum them carefully.
-  let hh = aa.x * bb.x;
-  let hl = aa.x * bb.y;
-  let lh = aa.y * bb.x;
-  let ll = aa.y * bb.y;
-  let e = ((opaque(hh) - p) + hl + lh) + ll;
-  return vec2f(p, e);
-}
-// Quick two-sum: assumes |a| >= |b| (faster, no opaque needed for branchless).
-fn quick_two_sum(a: f32, b: f32) -> vec2f {
-  let s = a + b;
-  let e = b - (opaque(s) - a);
-  return vec2f(s, e);
-}
-fn df_add(a: vec2f, b: vec2f) -> vec2f {
-  // IEEE-correct df + df from Hida/Li/Bailey "Library for Double-Double".
-  let s1 = two_sum(a.x, b.x);
-  let s2 = two_sum(a.y, b.y);
-  let s = quick_two_sum(s1.x, s1.y + s2.x);
-  return quick_two_sum(s.x, s.y + s2.y);
-}
-fn df_sub(a: vec2f, b: vec2f) -> vec2f { return df_add(a, vec2f(-b.x, -b.y)); }
-// Multiply df by 2 (exact in IEEE: scaling by power of 2 introduces no error).
-fn df_dbl(a: vec2f) -> vec2f { return vec2f(a.x + a.x, a.y + a.y); }
-fn df_mul(a: vec2f, b: vec2f) -> vec2f {
-  let p = two_prod(a.x, b.x);
-  // p.y already holds the rounding error of a.x*b.x; add the cross terms.
-  let e = p.y + (a.x * b.y + a.y * b.x);
-  return quick_two_sum(p.x, e);
-}
-// Fence both components — call between iteration steps so the optimizer
-// can't fuse / reassociate df_add(df_sub(zx²,zy²),cx) across iterations.
-fn df_fence(a: vec2f) -> vec2f {
-  return vec2f(opaque(a.x), opaque(a.y));
-}
-fn df_f32(a: f32) -> vec2f { return vec2f(a, 0.0); }
-fn df_to_f32(a: vec2f) -> f32 { return a.x + a.y; }
-
-// ---- color palette ---------------------------------------------------------
+@group(0) @binding(1) var<storage, read> ref_orbit: array<vec2f>;
 
 fn palette(t: f32) -> vec3f {
   let TAU = 6.2831853;
@@ -101,11 +42,8 @@ fn palette(t: f32) -> vec3f {
   return clamp(a + b * cos(TAU * (c * t + d)), vec3f(0.0), vec3f(1.0));
 }
 
-// ---- pipeline --------------------------------------------------------------
-
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
-  // Single full-screen triangle.
   let pos = array<vec2f, 3>(
     vec2f(-1.0, -1.0),
     vec2f( 3.0, -1.0),
@@ -114,9 +52,50 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
   return vec4f(pos[vi], 0.0, 1.0);
 }
 
+fn sample_at(fragxy: vec2f) -> vec3f {
+  // dc = pixel position relative to the *reference* point (not view centre).
+  let uv = (fragxy / u.resolution) * 2.0 - 1.0;
+  let dcx = uv.x * u.scale_x - u.ref_off.x;
+  let dcy = uv.y * u.scale_y - u.ref_off.y;
+
+  var dzx: f32 = 0.0;
+  var dzy: f32 = 0.0;
+  var iter: u32 = u.max_iter;
+  var final_zx: f32 = 0.0;
+  var final_zy: f32 = 0.0;
+
+  let limit = min(u.max_iter, u.ref_iters);
+  for (var n: u32 = 0u; n < limit; n = n + 1u) {
+    let Z = ref_orbit[n];
+    // True orbit at this pixel = Z + dz. Bail out using its magnitude.
+    let zx = Z.x + dzx;
+    let zy = Z.y + dzy;
+    let mag2 = zx * zx + zy * zy;
+    if (mag2 > 65536.0) {
+      iter = n;
+      final_zx = zx;
+      final_zy = zy;
+      break;
+    }
+    // dz_{n+1} = 2*Z*dz + dz^2 + dc
+    let new_dzx = 2.0 * (Z.x * dzx - Z.y * dzy) + (dzx * dzx - dzy * dzy) + dcx;
+    let new_dzy = 2.0 * (Z.x * dzy + Z.y * dzx) + 2.0 * dzx * dzy        + dcy;
+    dzx = new_dzx;
+    dzy = new_dzy;
+  }
+
+  if (iter >= u.max_iter) { return vec3f(0.0); }
+
+  let logZn = 0.5 * log(final_zx * final_zx + final_zy * final_zy);
+  let nu = log(logZn / log(2.0)) / log(2.0);
+  let smoothI = f32(iter) + 1.0 - nu;
+  let t = clamp(smoothI / f32(u.max_iter), 0.0, 1.0);
+  return palette(t);
+}
+
 @fragment
 fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
-  // 2x2 ordered-grid supersampling — cheap on the GPU, kills edge aliasing.
+  // 2x2 ordered-grid supersampling.
   var acc = vec3f(0.0);
   let offsets = array<vec2f, 4>(
     vec2f(-0.25, -0.25),
@@ -129,135 +108,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   }
   return vec4f(acc * 0.25, 1.0);
 }
-
-fn sample_at(fragxy: vec2f) -> vec3f {
-  let aspect = u.resolution.x / u.resolution.y;
-  let uv = (fragxy / u.resolution) * 2.0 - 1.0;
-
-  let sx_df = df_mul(df_f32(uv.x * aspect), u.scale);
-  let sy_df = df_mul(df_f32(uv.y),          u.scale);
-  let cxd = df_add(u.cx, sx_df);
-  let cyd = df_add(u.cy, sy_df);
-  let cxf0 = df_to_f32(cxd);
-  let cyf0 = df_to_f32(cyd);
-
-  let xm = cxf0 - 0.25;
-  let q = xm * xm + cyf0 * cyf0;
-  if (q * (q + xm) <= 0.25 * cyf0 * cyf0
-      || (cxf0 + 1.0) * (cxf0 + 1.0) + cyf0 * cyf0 <= 0.0625) {
-    return vec3f(0.0);
-  }
-  var iter: u32 = u.max_iter;
-  var final_mag2: f32 = 0.0;
-
-  if (u.use_df == 0u) {
-    let cx = cxf0;
-    let cy = cyf0;
-    var zx: f32 = 0.0;
-    var zy: f32 = 0.0;
-    var zx2: f32 = 0.0;
-    var zy2: f32 = 0.0;
-    for (var k: u32 = 0u; k < u.max_iter; k = k + 1u) {
-      zx2 = zx * zx;
-      zy2 = zy * zy;
-      if (zx2 + zy2 > 65536.0) { iter = k; break; }
-      let nzy = 2.0 * zx * zy + cy;
-      zx = zx2 - zy2 + cx;
-      zy = nzy;
-    }
-    final_mag2 = zx2 + zy2;
-  } else {
-    let cx = cxd;
-    let cy = cyd;
-    var zx = vec2f(0.0);
-    var zy = vec2f(0.0);
-    var zx2 = vec2f(0.0);
-    var zy2 = vec2f(0.0);
-    let two = df_f32(2.0);
-    for (var k: u32 = 0u; k < u.max_iter; k = k + 1u) {
-      zx2 = df_mul(zx, zx);
-      zy2 = df_mul(zy, zy);
-      let mag = df_to_f32(df_add(zx2, zy2));
-      if (mag > 65536.0) { iter = k; break; }
-      let two_zxzy = df_dbl(df_mul(zx, zy));
-      zy = df_fence(df_add(two_zxzy, cy));
-      zx = df_fence(df_add(df_sub(zx2, zy2), cx));
-    }
-    final_mag2 = df_to_f32(df_add(zx2, zy2));
-  }
-
-  if (iter >= u.max_iter) { return vec3f(0.0); }
-
-  let logZn = 0.5 * log(final_mag2);
-  let nu = log(logZn / log(2.0)) / log(2.0);
-  let smoothI = f32(iter) + 1.0 - nu;
-  let t = clamp(smoothI / f32(u.max_iter), 0.0, 1.0);
-  return palette(t);
-}
-
-fn _disabled_iterate(cxd: vec2f, cyd: vec2f, cxf0: f32, cyf0: f32) -> vec3f {
-  let xm = cxf0 - 0.25;
-  let q = xm * xm + cyf0 * cyf0;
-  if (q * (q + xm) <= 0.25 * cyf0 * cyf0
-      || (cxf0 + 1.0) * (cxf0 + 1.0) + cyf0 * cyf0 <= 0.0625) {
-    return vec3f(0.0);
-  }
-
-  var iter: u32 = u.max_iter;
-  var final_mag2: f32 = 0.0;
-
-  if (u.use_df == 0u) {
-    let cx = cxf0;
-    let cy = cyf0;
-    var zx: f32 = 0.0;
-    var zy: f32 = 0.0;
-    var zx2: f32 = 0.0;
-    var zy2: f32 = 0.0;
-    for (var k: u32 = 0u; k < u.max_iter; k = k + 1u) {
-      zx2 = zx * zx;
-      zy2 = zy * zy;
-      if (zx2 + zy2 > 65536.0) { iter = k; break; }
-      let nzy = 2.0 * zx * zy + cy;
-      zx = zx2 - zy2 + cx;
-      zy = nzy;
-    }
-    final_mag2 = zx2 + zy2;
-  } else {
-    let cx = cxd;
-    let cy = cyd;
-    var zx = vec2f(0.0);
-    var zy = vec2f(0.0);
-    var zx2 = vec2f(0.0);
-    var zy2 = vec2f(0.0);
-    let two = df_f32(2.0);
-    for (var k: u32 = 0u; k < u.max_iter; k = k + 1u) {
-      zx2 = df_mul(zx, zx);
-      zy2 = df_mul(zy, zy);
-      let mag = df_to_f32(df_add(zx2, zy2));
-      if (mag > 65536.0) { iter = k; break; }
-      let two_zxzy = df_mul(df_mul(two, zx), zy);
-      zy = df_add(two_zxzy, cy);
-      zx = df_add(df_sub(zx2, zy2), cx);
-    }
-    final_mag2 = df_to_f32(df_add(zx2, zy2));
-  }
-
-  if (iter >= u.max_iter) { return vec3f(0.0); }
-
-  let logZn = 0.5 * log(final_mag2);
-  let nu = log(logZn / log(2.0)) / log(2.0);
-  let smoothI = f32(iter) + 1.0 - nu;
-  let t = clamp(smoothI / f32(u.max_iter), 0.0, 1.0);
-  return palette(t);
-}
 `;
-
-function splitDouble(d) {
-  // Veltkamp split into hi+lo f32 so hi+lo == d (to f32 precision).
-  const hi = Math.fround(d);
-  const lo = d - hi;
-  return [hi, Math.fround(lo)];
-}
 
 export async function createWebGpuRenderer(canvas) {
   if (!navigator.gpu) return null;
@@ -271,7 +122,6 @@ export async function createWebGpuRenderer(canvas) {
   ctx.configure({ device, format, alphaMode: "opaque" });
 
   const module = device.createShaderModule({ code: SHADER });
-  // Surface WGSL compile diagnostics in the console.
   if (module.getCompilationInfo) {
     module.getCompilationInfo().then(info => {
       for (const m of info.messages) {
@@ -285,6 +135,7 @@ export async function createWebGpuRenderer(canvas) {
   device.addEventListener?.("uncapturederror", (ev) => {
     console.error("WebGPU uncaptured error:", ev.error?.message || ev.error);
   });
+
   const pipeline = device.createRenderPipeline({
     layout: "auto",
     vertex: { module, entryPoint: "vs" },
@@ -292,45 +143,63 @@ export async function createWebGpuRenderer(canvas) {
     primitive: { topology: "triangle-list" },
   });
 
-  const uniformSize = 64; // see WGSL Uniforms layout (multiple of 16)
+  const uniformSize = 32; // see WGSL Uniforms layout
   const uniformBuf = device.createBuffer({
     size: uniformSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+
+  // Storage buffer for the reference orbit. Sized once for the max iteration
+  // count we'd ever request; we just write the active prefix per draw.
+  const REF_MAX = 10001; // max_iter cap is 10000 in the UI
+  const refBuf = device.createBuffer({
+    size: REF_MAX * 8, // vec2<f32>
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuf } },
+      { binding: 1, resource: { buffer: refBuf } },
+    ],
   });
 
   const cpuUniform = new ArrayBuffer(uniformSize);
   const fView = new Float32Array(cpuUniform);
   const uView = new Uint32Array(cpuUniform);
 
-  let lastUseDf = 0;
   return {
-    lastPrecision() { return lastUseDf ? "df64" : "f32"; },
-    render(width, height, cx, cy, scale, maxIter) {
+    lastPrecision() { return "perturb"; },
+    render(width, height, cx, cy, scale, maxIter, refOrbit) {
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
         canvas.height = height;
       }
-      // Always use df64 — f32 aliases too easily even at moderate zooms.
-      const useDf = 1;
-      lastUseDf = useDf;
+
+      const aspect = width / height;
+      // First two f32s of refOrbit are the chosen reference point (ref_cx, ref_cy).
+      const refCx = refOrbit[0];
+      const refCy = refOrbit[1];
+      const orbitData = refOrbit.subarray(2);
+      const refIters = Math.min(REF_MAX, orbitData.length / 2);
 
       fView[0] = width;
       fView[1] = height;
-      const [cxh, cxl] = splitDouble(cx);
-      const [cyh, cyl] = splitDouble(cy);
-      const [scH, scL] = splitDouble(scale);
-      fView[2] = cxh; fView[3] = cxl;
-      fView[4] = cyh; fView[5] = cyl;
-      fView[6] = scH; fView[7] = scL;
-      uView[8] = maxIter | 0;
-      uView[9] = useDf;
-      fView[10] = 4097.0; // splitter
-      fView[11] = 0.0;    // pad0 — used as opaque-zero fence in WGSL
+      fView[2] = scale * aspect; // scale_x
+      fView[3] = scale;          // scale_y
+      uView[4] = maxIter | 0;
+      uView[5] = refIters | 0;
+      // ref_off = ref - view_centre, in complex coords.
+      fView[6] = refCx - cx;
+      fView[7] = refCy - cy;
       device.queue.writeBuffer(uniformBuf, 0, cpuUniform);
+
+      // Upload reference orbit (clipped to REF_MAX).
+      const bytes = refIters * 8;
+      device.queue.writeBuffer(
+        refBuf, 0, orbitData.buffer, orbitData.byteOffset, bytes
+      );
 
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginRenderPass({

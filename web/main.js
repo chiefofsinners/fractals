@@ -1,4 +1,4 @@
-import init, { render_mandelbrot } from "./pkg/fractals.js";
+import init, { render_mandelbrot, reference_orbit } from "./pkg/fractals.js";
 import { createGpuRenderer } from "./gpu.js";
 import { createWebGpuRenderer } from "./webgpu.js";
 
@@ -125,7 +125,12 @@ function draw(quality = "high") {
   if (backend === "webgl") {
     webgl.render(w, h, view.cx, view.cy, view.scale, maxIter);
   } else if (backend === "webgpu") {
-    webgpu.render(w, h, view.cx, view.cy, view.scale, maxIter);
+    // Compute reference orbit on the CPU in f64; the GPU iterates deltas
+    // around it in f32 (perturbation theory). Pick the longest-lived
+    // orbit within the view so detail near the boundary stays sharp.
+    const aspect = w / h;
+    const refOrbit = reference_orbit(view.cx, view.cy, view.scale, aspect, maxIter);
+    webgpu.render(w, h, view.cx, view.cy, view.scale, maxIter, refOrbit);
   } else {
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
