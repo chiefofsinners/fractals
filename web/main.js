@@ -31,15 +31,33 @@ const WEBGPU_MIN_SCALE = 1e-15;
 function activeBackend() {
   const want = rendererSelect.value;
   if (want === "webgpu") {
-    if (webgpu && view.scale > WEBGPU_MIN_SCALE) return "webgpu";
-    if (webgl && view.scale > WEBGL_MIN_SCALE) return "webgl";
+    if (webgpu) return "webgpu";
+    if (webgl) return "webgl";
     return "cpu";
   }
   if (want === "webgl") {
-    if (webgl && view.scale > WEBGL_MIN_SCALE) return "webgl";
+    if (webgl) return "webgl";
     return "cpu";
   }
   return "cpu";
+}
+
+// Smallest view.scale we'll let the user zoom to with each backend. Past
+// these values the per-pixel maths starts producing visibly wrong output
+// (flat blobs of colour, banding) so we just refuse to zoom further rather
+// than silently swap to a slower fallback.
+function minScaleForBackend(backend) {
+  if (backend === "webgl") return WEBGL_MIN_SCALE;
+  if (backend === "webgpu") return WEBGPU_MIN_SCALE;
+  return 0; // CPU is bounded by f64; no hard cap here.
+}
+
+// Clamp `scale` to whatever the *currently selected* backend can render
+// without falling apart. Caller should compute scale unconditionally and
+// then pass it through here, so a thwarted zoom just stops at the floor
+// (no fallback to CPU).
+function clampScale(scale) {
+  return Math.max(scale, minScaleForBackend(activeBackend()));
 }
 function syncCanvasVisibility(backend) {
   canvas.style.display      = backend === "cpu"    ? "" : "none";
@@ -389,7 +407,7 @@ surface.addEventListener("pointermove", (e) => {
     const anchorCx = a.viewCx + ax * a.scale * aspect;
     const anchorCy = a.viewCy + ay * a.scale;
 
-    const newScale = a.scale * (a.dist / newDist);
+    const newScale = clampScale(a.scale * (a.dist / newDist));
     const cMid = pointerCenter();
     const nx = (cMid.x - rect.left) / rect.width  * 2 - 1;
     const ny = (cMid.y - rect.top)  / rect.height * 2 - 1;
@@ -425,7 +443,8 @@ surface.addEventListener("click", (e) => {
   const p = pixelToComplex(e.clientX - rect.left, e.clientY - rect.top);
   view.cx = p.x;
   view.cy = p.y;
-  view.scale *= e.shiftKey ? 2.5 : 0.4;
+  const factor = e.shiftKey ? 2.5 : 0.4;
+  view.scale = clampScale(view.scale * factor);
   scheduleDraw("high");
 });
 
@@ -436,7 +455,7 @@ surface.addEventListener("wheel", (e) => {
   const py = e.clientY - rect.top;
   const before = pixelToComplex(px, py);
   const factor = Math.exp(e.deltaY * 0.0015);
-  view.scale *= factor;
+  view.scale = clampScale(view.scale * factor);
   const after = pixelToComplex(px, py);
   view.cx += before.x - after.x;
   view.cy += before.y - after.y;
@@ -491,10 +510,9 @@ async function boot() {
       opt.textContent += " \u2014 unavailable";
     }
   }
-  // Default: prefer WebGPU when available, else WebGL, else CPU.
-  if (webgpu) rendererSelect.value = "webgpu";
-  else if (webgl) rendererSelect.value = "webgl";
-  else rendererSelect.value = "cpu";
+  // Default: WebGL (fast and good enough for most zooms). The HTML already
+  // marks it as the selected option; only override if WebGL is unavailable.
+  if (!webgl) rendererSelect.value = webgpu ? "webgpu" : "cpu";
 
   ready = true;
   resizeAxes();
