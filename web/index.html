@@ -18,11 +18,14 @@
       header { padding: 0.5rem 1rem; display: flex; gap: 1rem; align-items: center;
         flex-wrap: wrap; border-bottom: 1px solid #222; flex: 0 0 auto; }
       header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+      header h1 .short { display: none; }
       header label { font-size: 0.85rem; display: inline-flex; align-items: center; gap: 0.3rem; }
       header input[type="number"], header select, header button {
         font: inherit; min-height: 1.8rem; }
       header input[type="number"] { width: 6rem; }
       header button { padding: 0.25rem 0.6rem; }
+      /* The slider + value readout are mobile-only; hide on desktop. */
+      #iterRange, #iterValue { display: none; }
       #status { font-size: 0.8rem; opacity: 0.75; margin-left: auto; }
       main { flex: 1 1 auto; position: relative; overflow: hidden;
         touch-action: none; }
@@ -43,7 +46,9 @@
       @media (max-width: 720px), (pointer: coarse) {
         header { padding: 0.4rem 0.6rem; gap: 0.5rem 0.75rem;
           row-gap: 0.4rem; }
-        header h1 { display: none; }
+        /* Show the abbreviated title; hide the long one. */
+        header h1 .long { display: none; }
+        header h1 .short { display: inline; }
         header label { font-size: 0.95rem; }
         header input[type="number"], header select, header button {
           font-size: 1rem; min-height: 2.25rem;
@@ -52,7 +57,12 @@
           background: #1d1d1d; color: inherit;
           border: 1px solid #333;
         }
-        header input[type="number"] { width: 4.5rem; }
+        /* Swap the number field for a range slider on touch. */
+        #iter { display: none; }
+        #iterRange { display: inline-block; width: 9rem; vertical-align: middle;
+          accent-color: #6cf; }
+        #iterValue { font-variant-numeric: tabular-nums; min-width: 2.5rem;
+          text-align: right; }
         /* Larger checkbox via a wrapping touch area. */
         header input[type="checkbox"] {
           width: 1.25rem; height: 1.25rem;
@@ -65,9 +75,11 @@
   </head>
   <body>
     <header>
-      <h1>Mandelbrot · Rust + WebAssembly</h1>
+      <h1><span class="long">Mandelbrot · Rust + WebAssembly</span><span class="short">Mandelbrot</span></h1>
       <label>Iter
         <input id="iter" type="number" min="32" max="10000" step="32" value="512" inputmode="numeric" />
+        <input id="iterRange" type="range" min="32" max="4000" step="32" value="512" />
+        <span id="iterValue">512</span>
       </label>
       <label><input id="showAxes" type="checkbox" /> Axes</label>
       <label>Renderer

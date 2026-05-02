@@ -10,6 +10,8 @@ const axesCanvas = document.getElementById("axes");
 const axesCtx = axesCanvas.getContext("2d");
 const surface = canvas.parentElement; // <main>
 const iterInput = document.getElementById("iter");
+const iterRange = document.getElementById("iterRange");
+const iterValue = document.getElementById("iterValue");
 const showAxes = document.getElementById("showAxes");
 const rendererSelect = document.getElementById("renderer");
 const resetBtn = document.getElementById("reset");
@@ -442,7 +444,21 @@ surface.addEventListener("wheel", (e) => {
   scheduleRefine();
 }, { passive: false });
 
-iterInput.addEventListener("change", () => scheduleDraw("high"));
+iterInput.addEventListener("change", () => {
+  // Sync the mobile slider whenever the number field changes (and clamp to
+  // its range so dragging the slider afterwards doesn't snap unexpectedly).
+  const v = Math.max(32, Math.min(10000, parseInt(iterInput.value, 10) || 512));
+  iterRange.value = String(Math.min(parseInt(iterRange.max, 10), v));
+  iterValue.textContent = String(v);
+  scheduleDraw("high");
+});
+// Slider: live preview while dragging (low quality), commit on release.
+iterRange.addEventListener("input", () => {
+  iterInput.value = iterRange.value;
+  iterValue.textContent = iterRange.value;
+  scheduleDraw("low");
+});
+iterRange.addEventListener("change", () => scheduleDraw("high"));
 showAxes.addEventListener("change", drawAxes);
 rendererSelect.addEventListener("change", () => scheduleDraw("high"));
 resetBtn.addEventListener("click", () => { view = { ...DEFAULT_VIEW }; scheduleDraw("high"); });
