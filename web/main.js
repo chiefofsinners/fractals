@@ -258,36 +258,117 @@ function drawAxes() {
   axesCtx.shadowBlur = 0;
 }
 
-let dragging = null;
+// --- Pointer handling: 1-finger / mouse = pan + click-to-zoom,
+//     2-finger = pinch-to-zoom-and-pan. Works on iOS, Android, trackpad.
+const pointers = new Map(); // id -> {x, y}
+let panAnchor = null;       // {clientX, clientY, viewCx, viewCy} for 1-finger pan
+let pinchAnchor = null;     // {dist, midX, midY, viewCx, viewCy, scale} for 2-finger
 let dragMoved = false;
 
+function pointerCenter() {
+  let sx = 0, sy = 0;
+  for (const p of pointers.values()) { sx += p.x; sy += p.y; }
+  const n = pointers.size;
+  return { x: sx / n, y: sy / n };
+}
+function pointerDistance() {
+  if (pointers.size < 2) return 0;
+  const it = pointers.values();
+  const a = it.next().value;
+  const b = it.next().value;
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 surface.addEventListener("pointerdown", (e) => {
-  dragging = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy };
-  dragMoved = false;
   surface.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  dragMoved = false;
+  if (pointers.size === 1) {
+    panAnchor = { clientX: e.clientX, clientY: e.clientY,
+                  viewCx: view.cx, viewCy: view.cy };
+    pinchAnchor = null;
+  } else if (pointers.size === 2) {
+    const c = pointerCenter();
+    pinchAnchor = {
+      dist: pointerDistance(),
+      midX: c.x, midY: c.y,
+      viewCx: view.cx, viewCy: view.cy,
+      scale: view.scale,
+    };
+    panAnchor = null;
+  }
 });
+
 surface.addEventListener("pointermove", (e) => {
-  if (!dragging) return;
-  if (Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y) > 3) dragMoved = true;
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
   const rect = surface.getBoundingClientRect();
   const c = activeCanvas();
   const aspect = (c.width || 1) / (c.height || 1);
-  const dx = (e.clientX - dragging.x) / rect.width * 2 * view.scale * aspect;
-  const dy = (e.clientY - dragging.y) / rect.height * 2 * view.scale;
-  view.cx = dragging.cx - dx;
-  view.cy = dragging.cy - dy;
-  scheduleDraw("low");
-  scheduleRefine();
+
+  if (pointers.size === 1 && panAnchor) {
+    const dxPx = e.clientX - panAnchor.clientX;
+    const dyPx = e.clientY - panAnchor.clientY;
+    if (Math.hypot(dxPx, dyPx) > 3) dragMoved = true;
+    const dx = dxPx / rect.width  * 2 * view.scale * aspect;
+    const dy = dyPx / rect.height * 2 * view.scale;
+    view.cx = panAnchor.viewCx - dx;
+    view.cy = panAnchor.viewCy - dy;
+    scheduleDraw("low");
+    scheduleRefine();
+  } else if (pointers.size >= 2 && pinchAnchor) {
+    dragMoved = true;
+    const newDist = pointerDistance();
+    if (newDist <= 0) return;
+    const ratio = pinchAnchor.dist / newDist; // larger pinch → smaller scale
+    const newScale = pinchAnchor.scale * ratio;
+
+    // Keep the *initial* mid-point of the gesture pinned to its complex
+    // coordinate, then translate by how far the mid-point has moved.
+    const cMid = pointerCenter();
+    const px = pinchAnchor.midX - rect.left;
+    const py = pinchAnchor.midY - rect.top;
+    // Complex coords of the pinch midpoint *under the original transform*.
+    const ux = (px / rect.width)  * 2 - 1;
+    const uy = (py / rect.height) * 2 - 1;
+    const anchorCx = pinchAnchor.viewCx + ux * pinchAnchor.scale * aspect;
+    const anchorCy = pinchAnchor.viewCy + uy * pinchAnchor.scale;
+    // Where the midpoint is now, in pixel coords.
+    const npx = cMid.x - rect.left;
+    const npy = cMid.y - rect.top;
+    const nux = (npx / rect.width)  * 2 - 1;
+    const nuy = (npy / rect.height) * 2 - 1;
+    view.scale = newScale;
+    view.cx = anchorCx - nux * newScale * aspect;
+    view.cy = anchorCy - nuy * newScale;
+    scheduleDraw("low");
+    scheduleRefine();
+  }
 });
-const endDrag = () => {
-  if (dragging) scheduleRefine();
-  dragging = null;
+
+const releasePointer = (e) => {
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0) {
+    panAnchor = null;
+    pinchAnchor = null;
+    scheduleRefine();
+  } else if (pointers.size === 1) {
+    // Dropped from pinch back to single-touch pan: re-anchor.
+    pinchAnchor = null;
+    const only = pointers.values().next().value;
+    panAnchor = { clientX: only.x, clientY: only.y,
+                  viewCx: view.cx, viewCy: view.cy };
+  }
 };
-surface.addEventListener("pointerup", endDrag);
-surface.addEventListener("pointercancel", endDrag);
+surface.addEventListener("pointerup", releasePointer);
+surface.addEventListener("pointercancel", releasePointer);
 
 surface.addEventListener("click", (e) => {
-  if (dragMoved) return; // don't zoom after a pan
+  if (dragMoved) return; // don't zoom after a pan / pinch
+  // Suppress click-zoom on touch devices — they have pinch instead, and a
+  // tap-to-zoom would fight with double-tap behaviours.
+  if (e.pointerType === "touch") return;
   const rect = surface.getBoundingClientRect();
   const p = pixelToComplex(e.clientX - rect.left, e.clientY - rect.top);
   view.cx = p.x;
