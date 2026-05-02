@@ -27,8 +27,10 @@ vec3 palette(float t) {
 void main() {
   float aspect = u_resolution.x / u_resolution.y;
   vec2 uv = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0; // [-1,1]
+  // gl_FragCoord.y is bottom-up; negate so increasing screen-y → increasing
+  // complex-y, matching the CPU and WebGPU backends.
   vec2 c = vec2(u_center.x + uv.x * u_scale * aspect,
-                u_center.y + uv.y * u_scale);
+                u_center.y - uv.y * u_scale);
 
   // Cardioid / period-2 bulb early exit.
   float xm = c.x - 0.25;
