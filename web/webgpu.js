@@ -38,21 +38,26 @@ fn two_sum(a: f32, b: f32) -> vec2f {
   let e = (a - opaque(opaque(s) - bb)) + (b - bb);
   return vec2f(s, e);
 }
-// Veltkamp split. Splitter (= 2^12 + 1 = 4097) comes from a uniform so the
-// compiler cannot constant-fold (t - (t - a)) back to a.
+// Veltkamp split. The compiler tries hard to simplify (t - (t - a)) → a;
+// we wrap each arithmetic step in opaque() so it can't see through.
 fn split(a: f32) -> vec2f {
-  let t = u.splitter * a;
-  let hi = opaque(t - (t - a));
+  let t = opaque(u.splitter * a);
+  let t_minus_a = opaque(t - a);
+  let hi = opaque(t - t_minus_a);
   let lo = a - hi;
   return vec2f(hi, lo);
 }
-// Dekker product (no FMA). With 12-bit splits, every sub-product is exact
-// in f32, and (aa.x*bb.x - p) captures the rounding error of a*b.
 fn two_prod(a: f32, b: f32) -> vec2f {
   let p = a * b;
   let aa = split(a);
   let bb = split(b);
-  let e = ((opaque(aa.x * bb.x) - p) + aa.x * bb.y + aa.y * bb.x) + aa.y * bb.y;
+  // Each of aa.x*bb.x, aa.x*bb.y, aa.y*bb.x, aa.y*bb.y is exactly representable
+  // in f32 (split makes hi 12-bit, lo 12-bit). Sum them carefully.
+  let hh = aa.x * bb.x;
+  let hl = aa.x * bb.y;
+  let lh = aa.y * bb.x;
+  let ll = aa.y * bb.y;
+  let e = ((opaque(hh) - p) + hl + lh) + ll;
   return vec2f(p, e);
 }
 // Quick two-sum: assumes |a| >= |b| (faster, no opaque needed for branchless).
