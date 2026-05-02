@@ -14,6 +14,9 @@ uniform vec2  u_resolution;
 uniform vec2  u_center;     // complex-plane center
 uniform float u_scale;      // half-height of viewport in complex plane
 uniform int   u_maxIter;
+// 0 = Mandelbrot (z0 = 0, c = pixel), 1 = Julia (z0 = pixel, c = u_jc).
+uniform int   u_mode;
+uniform vec2  u_jc;
 
 vec3 palette(float t) {
   const float TAU = 6.2831853;
@@ -29,19 +32,28 @@ void main() {
   vec2 uv = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0; // [-1,1]
   // gl_FragCoord.y is bottom-up; negate so increasing screen-y → increasing
   // complex-y, matching the CPU and WebGPU backends.
-  vec2 c = vec2(u_center.x + uv.x * u_scale * aspect,
+  vec2 p = vec2(u_center.x + uv.x * u_scale * aspect,
                 u_center.y - uv.y * u_scale);
 
-  // Cardioid / period-2 bulb early exit.
-  float xm = c.x - 0.25;
-  float q = xm*xm + c.y*c.y;
-  if (q * (q + xm) <= 0.25 * c.y * c.y ||
-      (c.x + 1.0)*(c.x + 1.0) + c.y*c.y <= 0.0625) {
-    outColor = vec4(0.0, 0.0, 0.0, 1.0);
-    return;
+  // For Mandelbrot c is the pixel and z0 = 0; for Julia z0 is the pixel
+  // and c is the constant u_jc.
+  vec2 c, z;
+  if (u_mode == 0) {
+    c = p;
+    z = vec2(0.0);
+    // Cardioid / period-2 bulb early exit (Mandelbrot only).
+    float xm = c.x - 0.25;
+    float q = xm*xm + c.y*c.y;
+    if (q * (q + xm) <= 0.25 * c.y * c.y ||
+        (c.x + 1.0)*(c.x + 1.0) + c.y*c.y <= 0.0625) {
+      outColor = vec4(0.0, 0.0, 0.0, 1.0);
+      return;
+    }
+  } else {
+    c = u_jc;
+    z = p;
   }
 
-  vec2 z = vec2(0.0);
   const float BAILOUT = 65536.0;
   int i = 0;
   float zx2 = 0.0, zy2 = 0.0;
@@ -106,13 +118,15 @@ export function createGpuRenderer(canvas) {
   const uCenter = gl.getUniformLocation(prog, "u_center");
   const uScale = gl.getUniformLocation(prog, "u_scale");
   const uMaxIter = gl.getUniformLocation(prog, "u_maxIter");
+  const uMode = gl.getUniformLocation(prog, "u_mode");
+  const uJc = gl.getUniformLocation(prog, "u_jc");
 
   gl.useProgram(prog);
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
   return {
-    render(width, height, cx, cy, scale, maxIter) {
+    render(width, height, cx, cy, scale, maxIter, mode = 0, jcx = 0, jcy = 0) {
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
         canvas.height = height;
@@ -122,6 +136,8 @@ export function createGpuRenderer(canvas) {
       gl.uniform2f(uCenter, cx, cy);
       gl.uniform1f(uScale, scale);
       gl.uniform1i(uMaxIter, maxIter | 0);
+      gl.uniform1i(uMode, mode | 0);
+      gl.uniform2f(uJc, jcx, jcy);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
   };

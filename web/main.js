@@ -1,4 +1,4 @@
-import init, { render_mandelbrot, reference_orbit } from "./pkg/fractals.js";
+import init, { render_mandelbrot, render_julia, reference_orbit, julia_reference } from "./pkg/fractals.js";
 import { createGpuRenderer } from "./gpu.js";
 import { createWebGpuRenderer } from "./webgpu.js";
 
@@ -12,6 +12,10 @@ const surface = canvas.parentElement; // <main>
 const iterInput = document.getElementById("iter");
 const iterRange = document.getElementById("iterRange");
 const iterValue = document.getElementById("iterValue");
+const fractalSelect = document.getElementById("fractal");
+const jcxInput = document.getElementById("jcx");
+const jcyInput = document.getElementById("jcy");
+const juliaControls = document.getElementById("juliaControls");
 const showAxes = document.getElementById("showAxes");
 const rendererSelect = document.getElementById("renderer");
 const resetBtn = document.getElementById("reset");
@@ -66,6 +70,12 @@ function syncCanvasVisibility(backend) {
 }
 
 const DEFAULT_VIEW = { cx: -0.5, cy: 0.0, scale: 1.25 };
+// Julia sets are centred on the origin; Mandelbrot's natural framing is
+// shifted left so the bulb sits in view.
+const DEFAULT_VIEWS = {
+  mandelbrot: { cx: -0.5, cy: 0.0, scale: 1.25 },
+  julia:      { cx:  0.0, cy: 0.0, scale: 1.5  },
+};
 let view = { ...DEFAULT_VIEW };
 let ready = false;
 let drawScheduled = false;
@@ -140,27 +150,40 @@ function scheduleRefine() {
 // to f32 — essential beyond ~scale 1e-7, where naively reading the f32
 // reference coords back from the orbit buffer would jitter the perturbation
 // centre by orders of magnitude more than a pixel.
-let cachedRef = null; // { absCx, absCy, triedMaxIter, orbit }
+let cachedRef = null; // { absCx, absCy, triedMaxIter, orbit, key }
+
+function currentJuliaC() {
+  return {
+    x: parseFloat(jcxInput.value) || 0,
+    y: parseFloat(jcyInput.value) || 0,
+  };
+}
+function currentFractal() {
+  // Returns 0 (Mandelbrot) or 1 (Julia).
+  return fractalSelect.value === "julia" ? 1 : 0;
+}
 
 function getReferenceOrbit(cx, cy, scale, aspect, maxIter) {
   const halfX = scale * aspect;
   const halfY = scale;
+  const fractal = currentFractal();
+  const jc = currentJuliaC();
+  // Cache key: invalidate whenever the fractal type or Julia c changes.
+  const key = fractal === 1 ? `j:${jc.x}:${jc.y}` : "m";
   const inView = cachedRef
+    && cachedRef.key === key
     && cachedRef.absCx >= cx - halfX && cachedRef.absCx <= cx + halfX
     && cachedRef.absCy >= cy - halfY && cachedRef.absCy <= cy + halfY;
-  // Reuse if the reference is still on screen *and* we've already searched
-  // for the current iteration budget (or higher). If maxIter went up a
-  // second search may turn up a longer reference, so it's worth one retry.
   if (!(inView && cachedRef.triedMaxIter >= maxIter)) {
-    const orbit = reference_orbit(cx, cy, scale, aspect, maxIter);
-    // Rust returns ref_off in the header (computed in f64 then cast). Add
-    // it to the *current* view centre in f64 to recover the absolute
-    // reference point; that's what we cache.
+    const orbit = fractal === 1
+      ? julia_reference(cx, cy, scale, aspect, jc.x, jc.y, maxIter)
+      : reference_orbit(cx, cy, scale, aspect, maxIter);
     cachedRef = {
       absCx: cx + orbit[0],
       absCy: cy + orbit[1],
       triedMaxIter: maxIter,
       orbit,
+      key,
     };
   }
   return cachedRef;
@@ -183,29 +206,25 @@ function draw(quality = "high") {
     ? userIter : Math.min(userIter, LOW_ITER_CAP);
 
   const t0 = performance.now();
+  const fractal = currentFractal();
+  const jc = currentJuliaC();
   if (backend === "webgl") {
-    webgl.render(w, h, view.cx, view.cy, view.scale, maxIter);
+    webgl.render(w, h, view.cx, view.cy, view.scale, maxIter, fractal, jc.x, jc.y);
   } else if (backend === "webgpu") {
-    // Compute reference orbit on the CPU in f64; the GPU iterates deltas
-    // around it in f32 (perturbation theory). The reference is *cached*
-    // and reused while it remains inside the current view and long enough,
-    // because re-running the 9x9 grid search every frame would otherwise
-    // pick different winners as the view scrolled — making the image flicker
-    // darker mid-zoom (more pixels falling through the f32 fallback path)
-    // and brighten back up once motion settled on a stable choice.
     const aspect = w / h;
     const ref = getReferenceOrbit(view.cx, view.cy, view.scale, aspect, maxIter);
-    // Compute ref_off in f64 from the *current* view centre and the cached
-    // absolute reference; the GPU only ever sees the (small) f32 result.
     const refOffX = ref.absCx - view.cx;
     const refOffY = ref.absCy - view.cy;
-    webgpu.render(w, h, view.cx, view.cy, view.scale, maxIter, ref.orbit, refOffX, refOffY);
+    webgpu.render(w, h, view.cx, view.cy, view.scale, maxIter,
+                  ref.orbit, refOffX, refOffY, fractal, jc.x, jc.y);
   } else {
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
     }
-    const pixels = render_mandelbrot(w, h, view.cx, view.cy, view.scale, maxIter);
+    const pixels = fractal === 1
+      ? render_julia(w, h, view.cx, view.cy, view.scale, jc.x, jc.y, maxIter)
+      : render_mandelbrot(w, h, view.cx, view.cy, view.scale, maxIter);
     const img = new ImageData(new Uint8ClampedArray(pixels), w, h);
     ctx.putImageData(img, 0, 0);
   }
@@ -480,7 +499,23 @@ iterRange.addEventListener("input", () => {
 iterRange.addEventListener("change", () => scheduleDraw("high"));
 showAxes.addEventListener("change", drawAxes);
 rendererSelect.addEventListener("change", () => scheduleDraw("high"));
-resetBtn.addEventListener("click", () => { view = { ...DEFAULT_VIEW }; scheduleDraw("high"); });
+fractalSelect.addEventListener("change", () => {
+  juliaControls.classList.toggle("show", fractalSelect.value === "julia");
+  // Re-centre to the type's natural framing whenever the user switches.
+  view = { ...DEFAULT_VIEWS[fractalSelect.value] };
+  cachedRef = null;
+  scheduleDraw("high");
+});
+const onJuliaCChange = () => {
+  cachedRef = null; // c changed, reference orbit is stale
+  scheduleDraw("high");
+};
+jcxInput.addEventListener("change", onJuliaCChange);
+jcyInput.addEventListener("change", onJuliaCChange);
+resetBtn.addEventListener("click", () => {
+  view = { ...DEFAULT_VIEWS[fractalSelect.value] };
+  scheduleDraw("high");
+});
 
 let resizeTimer;
 window.addEventListener("resize", () => {

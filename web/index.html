@@ -26,6 +26,9 @@
       header button { padding: 0.25rem 0.6rem; }
       /* The slider + value readout are mobile-only; hide on desktop. */
       #iterRange, #iterValue { display: none; }
+      #juliaControls { display: none; gap: 0.4rem; align-items: center; }
+      #juliaControls.show { display: inline-flex; }
+      #juliaControls input[type="number"] { width: 5rem; }
       #status { font-size: 0.8rem; opacity: 0.75; margin-left: auto; }
       main { flex: 1 1 auto; position: relative; overflow: hidden;
         touch-action: none; }
@@ -75,8 +78,16 @@
   </head>
   <body>
     <header>
-      <h1><span class="long">Mandelbrot · Rust + WebAssembly</span><span class="short">Mandelbrot</span></h1>
-      <label>Iter
+      <h1><span class="long">Mandelbrot Set</span><span class="short">Mandelbrot</span></h1>      <label>Fractal
+        <select id="fractal">
+          <option value="mandelbrot" selected>Mandelbrot</option>
+          <option value="julia">Julia</option>
+        </select>
+      </label>
+      <span id="juliaControls">
+        <label>c.x <input id="jcx" type="number" step="0.01" value="-0.7" /></label>
+        <label>c.y <input id="jcy" type="number" step="0.01" value="0.27015" /></label>
+      </span>      <label>Iter
         <input id="iter" type="number" min="32" max="10000" step="32" value="512" inputmode="numeric" />
         <input id="iterRange" type="range" min="32" max="4000" step="32" value="512" />
         <span id="iterValue">512</span>

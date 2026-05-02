@@ -29,7 +29,12 @@ struct Uniforms {
   // centre. Computed in f64 on the CPU (Rust) before being cast to f32 —
   // f32 is plenty for this small offset (|ref_off| <= scale).
   ref_off:    vec2f,
-  _pad:       vec2f,
+  // 0 = Mandelbrot (z0 = 0, c varies per pixel), 1 = Julia (z0 varies
+  // per pixel, c is the constant 'jc').
+  mode:       u32,
+  _pad0:      u32,
+  jc:         vec2f,
+  _pad1:      vec2f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> ref_orbit: array<vec2f>;
@@ -54,13 +59,22 @@ fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 }
 
 fn sample_at(fragxy: vec2f) -> vec3f {
-  // dc = pixel position relative to the *reference* point (not view centre).
+  // dPix = pixel position relative to the chosen reference point. For
+  // Mandelbrot this is 'dc' (per-pixel offset of c, since z0 = 0); for
+  // Julia it's 'dz0' (per-pixel offset of the starting z, since c is
+  // constant). Either way the per-pixel state we iterate is dz, and the
+  // recurrence differs only by whether we add dPix each step.
   let uv = (fragxy / u.resolution) * 2.0 - 1.0;
-  let dcx = uv.x * u.scale_x - u.ref_off.x;
-  let dcy = uv.y * u.scale_y - u.ref_off.y;
+  let dpx = uv.x * u.scale_x - u.ref_off.x;
+  let dpy = uv.y * u.scale_y - u.ref_off.y;
 
-  var dzx: f32 = 0.0;
-  var dzy: f32 = 0.0;
+  // Julia: dz starts at the pixel offset; Mandelbrot: dz starts at 0.
+  var dzx: f32 = select(0.0, dpx, u.mode == 1u);
+  var dzy: f32 = select(0.0, dpy, u.mode == 1u);
+  // For Mandelbrot, dPix is the per-iteration '+dc'; for Julia, no add.
+  let addx: f32 = select(dpx, 0.0, u.mode == 1u);
+  let addy: f32 = select(dpy, 0.0, u.mode == 1u);
+
   var iter: u32 = u.max_iter;
   var final_zx: f32 = 0.0;
   var final_zy: f32 = 0.0;
@@ -78,27 +92,31 @@ fn sample_at(fragxy: vec2f) -> vec3f {
       final_zy = zy;
       break;
     }
-    // dz_{n+1} = 2*Z*dz + dz^2 + dc
-    let new_dzx = 2.0 * (Z.x * dzx - Z.y * dzy) + (dzx * dzx - dzy * dzy) + dcx;
-    let new_dzy = 2.0 * (Z.x * dzy + Z.y * dzx) + 2.0 * dzx * dzy        + dcy;
+    // dz_{n+1} = 2*Z*dz + dz^2  (+ dc for Mandelbrot)
+    let new_dzx = 2.0 * (Z.x * dzx - Z.y * dzy) + (dzx * dzx - dzy * dzy) + addx;
+    let new_dzy = 2.0 * (Z.x * dzy + Z.y * dzx) + 2.0 * dzx * dzy        + addy;
     dzx = new_dzx;
     dzy = new_dzy;
   }
 
   // If the reference orbit ran out before this pixel escaped, keep going
-  // in plain f32 from the current true orbit position. c is reconstructed
-  // as ref_c + dc, where ref_c = ref_orbit[1] (because Z_1 = Z_0^2 + c = c
-  // since Z_0 = 0). This is f32-precise for moderate zooms and avoids the
-  // black-blob glitches that would otherwise appear wherever the reference
-  // dies young; at extreme zoom the f32 ref_c is imprecise, but in that
-  // regime a good in-set reference normally prevents this branch firing.
+  // in plain f32 from the current true orbit position.
+  // Mandelbrot: c = ref_c + dc, where ref_c = ref_orbit[1] (Z_1 = c since
+  //   Z_0 = 0). Julia: c is constant = u.jc.
   if (iter >= u.max_iter && u.ref_iters < u.max_iter) {
     let lastZ = ref_orbit[u.ref_iters - 1u];
-    let refC = ref_orbit[1u];
     var zx = lastZ.x + dzx;
     var zy = lastZ.y + dzy;
-    let cx = refC.x + dcx;
-    let cy = refC.y + dcy;
+    var cx: f32;
+    var cy: f32;
+    if (u.mode == 1u) {
+      cx = u.jc.x;
+      cy = u.jc.y;
+    } else {
+      let refC = ref_orbit[1u];
+      cx = refC.x + dpx;
+      cy = refC.y + dpy;
+    }
     for (var n: u32 = u.ref_iters; n < u.max_iter; n = n + 1u) {
       let zx2 = zx * zx;
       let zy2 = zy * zy;
@@ -173,7 +191,9 @@ export async function createWebGpuRenderer(canvas) {
     primitive: { topology: "triangle-list" },
   });
 
-  const uniformSize = 48; // see WGSL Uniforms layout (multiple of 16)
+  // Uniforms layout (see WGSL): 32B base + mode/_pad0 (8B) + jc/_pad1 (16B) = 56B,
+  // padded up to a 16B multiple = 64B.
+  const uniformSize = 64;
   const uniformBuf = device.createBuffer({
     size: uniformSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -201,7 +221,8 @@ export async function createWebGpuRenderer(canvas) {
 
   return {
     lastPrecision() { return "perturb"; },
-    render(width, height, cx, cy, scale, maxIter, refOrbit, refOffX, refOffY) {
+    render(width, height, cx, cy, scale, maxIter, refOrbit, refOffX, refOffY,
+           mode = 0, jcx = 0, jcy = 0) {
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
         canvas.height = height;
@@ -222,9 +243,13 @@ export async function createWebGpuRenderer(canvas) {
       fView[3] = scale;          // scale_y
       uView[4] = maxIter | 0;
       uView[5] = refIters | 0;
-      fView[6] = refOffX;
-      fView[7] = refOffY;
-      // fView[8..11] = padding
+      fView[6] = refOffX;        // ref_off.x
+      fView[7] = refOffY;        // ref_off.y
+      uView[8] = mode | 0;       // 0 = Mandelbrot, 1 = Julia
+      // uView[9] = _pad0
+      fView[10] = jcx;           // jc.x
+      fView[11] = jcy;           // jc.y
+      // fView[12..15] = _pad1
       device.queue.writeBuffer(uniformBuf, 0, cpuUniform);
 
       // Upload reference orbit (clipped to REF_MAX).
