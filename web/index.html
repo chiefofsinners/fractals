@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mandelbrot (Rust + WASM)</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #111; color: #eee;
+        font-family: system-ui, sans-serif; overflow: hidden; }
+      body { display: flex; flex-direction: column; height: 100vh; }
+      header { padding: 0.5rem 1rem; display: flex; gap: 1rem; align-items: center;
+        flex-wrap: wrap; border-bottom: 1px solid #222; flex: 0 0 auto; }
+      header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+      header label { font-size: 0.85rem; display: inline-flex; align-items: center; gap: 0.3rem; }
+      header input[type="number"] { width: 6rem; }
+      header button { padding: 0.25rem 0.6rem; }
+      #status { font-size: 0.8rem; opacity: 0.75; margin-left: auto; }
+      main { flex: 1 1 auto; position: relative; overflow: hidden; }
+      canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+        display: block; cursor: crosshair; }
+      #canvas { background: #000; image-rendering: pixelated;
+        image-rendering: crisp-edges; }
+      #gpu, #webgpu { background: #000; }
+      #axes { pointer-events: none; background: transparent; }
+      .hint { position: absolute; left: 0.75rem; bottom: 0.5rem;
+        font-size: 0.75rem; opacity: 0.6; pointer-events: none;
+        text-shadow: 0 1px 2px #000; margin: 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Mandelbrot · Rust + WebAssembly</h1>
+      <label>Iterations
+        <input id="iter" type="number" min="32" max="10000" step="32" value="512" />
+      </label>
+      <label><input id="showAxes" type="checkbox" /> Axes</label>
+      <label>Renderer
+        <select id="renderer">
+          <option value="webgpu" selected>WebGPU (df64)</option>
+          <option value="webgl">WebGL (f32)</option>
+          <option value="cpu">CPU (Rust f64)</option>
+        </select>
+      </label>
+      <button id="reset">Reset view</button>
+      <span id="status">loading…</span>
+    </header>
+    <main>
+      <canvas id="webgpu"></canvas>
+      <canvas id="gpu"></canvas>
+      <canvas id="canvas"></canvas>
+      <canvas id="axes"></canvas>
+      <p class="hint">Click to zoom in · Shift+click to zoom out · Wheel to zoom · Drag to pan</p>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
