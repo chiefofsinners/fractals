@@ -105,6 +105,29 @@ function scheduleRefine() {
   }, 140);
 }
 
+// Cached reference orbit for the WebGPU perturbation renderer. We reuse
+// it as long as the chosen reference point is still inside the current
+// view; recomputing every frame would otherwise let the 9x9 grid search
+// pick a different winner each time the view scrolled, making the image
+// flicker darker mid-zoom (more pixels falling through the f32 fallback)
+// and brighten again once motion settled on a stable choice.
+let cachedRef = null; // { cx, cy, triedMaxIter, orbit }
+
+function getReferenceOrbit(cx, cy, scale, aspect, maxIter) {
+  const halfX = scale * aspect;
+  const halfY = scale;
+  const inView = cachedRef
+    && cachedRef.cx >= cx - halfX && cachedRef.cx <= cx + halfX
+    && cachedRef.cy >= cy - halfY && cachedRef.cy <= cy + halfY;
+  // Reuse if the reference is still on screen *and* we've already searched
+  // for the current iteration budget (or higher). If maxIter went up a
+  // second search may turn up a longer reference, so it's worth one retry.
+  if (inView && cachedRef.triedMaxIter >= maxIter) return cachedRef.orbit;
+  const orbit = reference_orbit(cx, cy, scale, aspect, maxIter);
+  cachedRef = { cx: orbit[0], cy: orbit[1], triedMaxIter: maxIter, orbit };
+  return orbit;
+}
+
 function draw(quality = "high") {
   if (!ready) return;
   const backend = activeBackend();
@@ -126,10 +149,14 @@ function draw(quality = "high") {
     webgl.render(w, h, view.cx, view.cy, view.scale, maxIter);
   } else if (backend === "webgpu") {
     // Compute reference orbit on the CPU in f64; the GPU iterates deltas
-    // around it in f32 (perturbation theory). Pick the longest-lived
-    // orbit within the view so detail near the boundary stays sharp.
+    // around it in f32 (perturbation theory). The reference is *cached*
+    // and reused while it remains inside the current view and long enough,
+    // because re-running the 9x9 grid search every frame would otherwise
+    // pick different winners as the view scrolled — making the image flicker
+    // darker mid-zoom (more pixels falling through the f32 fallback path)
+    // and brighten back up once motion settled on a stable choice.
     const aspect = w / h;
-    const refOrbit = reference_orbit(view.cx, view.cy, view.scale, aspect, maxIter);
+    const refOrbit = getReferenceOrbit(view.cx, view.cy, view.scale, aspect, maxIter);
     webgpu.render(w, h, view.cx, view.cy, view.scale, maxIter, refOrbit);
   } else {
     if (canvas.width !== w || canvas.height !== h) {
