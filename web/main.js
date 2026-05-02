@@ -283,21 +283,28 @@ surface.addEventListener("pointerdown", (e) => {
   surface.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   dragMoved = false;
+  reanchor();
+});
+
+// Re-snapshot the gesture state from the *current* pointers + view, so each
+// new finger down/up doesn't cause a jump.
+function reanchor() {
+  panAnchor = null;
+  pinchAnchor = null;
   if (pointers.size === 1) {
-    panAnchor = { clientX: e.clientX, clientY: e.clientY,
+    const only = pointers.values().next().value;
+    panAnchor = { clientX: only.x, clientY: only.y,
                   viewCx: view.cx, viewCy: view.cy };
-    pinchAnchor = null;
-  } else if (pointers.size === 2) {
-    const c = pointerCenter();
+  } else if (pointers.size >= 2) {
     pinchAnchor = {
       dist: pointerDistance(),
-      midX: c.x, midY: c.y,
-      viewCx: view.cx, viewCy: view.cy,
+      mid: pointerCenter(),
+      viewCx: view.cx,
+      viewCy: view.cy,
       scale: view.scale,
     };
-    panAnchor = null;
   }
-});
+}
 
 surface.addEventListener("pointermove", (e) => {
   if (!pointers.has(e.pointerId)) return;
@@ -321,27 +328,23 @@ surface.addEventListener("pointermove", (e) => {
     dragMoved = true;
     const newDist = pointerDistance();
     if (newDist <= 0) return;
-    const ratio = pinchAnchor.dist / newDist; // larger pinch → smaller scale
-    const newScale = pinchAnchor.scale * ratio;
 
-    // Keep the *initial* mid-point of the gesture pinned to its complex
-    // coordinate, then translate by how far the mid-point has moved.
+    // The point in complex space that was under the original pinch midpoint.
+    // We pin it to wherever the current pinch midpoint is now, while scaling
+    // the view by (originalDist / newDist).
+    const a = pinchAnchor;
+    const ax = (a.mid.x - rect.left) / rect.width  * 2 - 1; // [-1, 1]
+    const ay = (a.mid.y - rect.top)  / rect.height * 2 - 1;
+    const anchorCx = a.viewCx + ax * a.scale * aspect;
+    const anchorCy = a.viewCy + ay * a.scale;
+
+    const newScale = a.scale * (a.dist / newDist);
     const cMid = pointerCenter();
-    const px = pinchAnchor.midX - rect.left;
-    const py = pinchAnchor.midY - rect.top;
-    // Complex coords of the pinch midpoint *under the original transform*.
-    const ux = (px / rect.width)  * 2 - 1;
-    const uy = (py / rect.height) * 2 - 1;
-    const anchorCx = pinchAnchor.viewCx + ux * pinchAnchor.scale * aspect;
-    const anchorCy = pinchAnchor.viewCy + uy * pinchAnchor.scale;
-    // Where the midpoint is now, in pixel coords.
-    const npx = cMid.x - rect.left;
-    const npy = cMid.y - rect.top;
-    const nux = (npx / rect.width)  * 2 - 1;
-    const nuy = (npy / rect.height) * 2 - 1;
+    const nx = (cMid.x - rect.left) / rect.width  * 2 - 1;
+    const ny = (cMid.y - rect.top)  / rect.height * 2 - 1;
     view.scale = newScale;
-    view.cx = anchorCx - nux * newScale * aspect;
-    view.cy = anchorCy - nuy * newScale;
+    view.cx = anchorCx - nx * newScale * aspect;
+    view.cy = anchorCy - ny * newScale;
     scheduleDraw("low");
     scheduleRefine();
   }
@@ -353,12 +356,10 @@ const releasePointer = (e) => {
     panAnchor = null;
     pinchAnchor = null;
     scheduleRefine();
-  } else if (pointers.size === 1) {
-    // Dropped from pinch back to single-touch pan: re-anchor.
-    pinchAnchor = null;
-    const only = pointers.values().next().value;
-    panAnchor = { clientX: only.x, clientY: only.y,
-                  viewCx: view.cx, viewCy: view.cy };
+  } else {
+    // Adding or removing a finger mid-gesture: re-snapshot so the next
+    // move is relative to the current view, not the stale anchor.
+    reanchor();
   }
 };
 surface.addEventListener("pointerup", releasePointer);

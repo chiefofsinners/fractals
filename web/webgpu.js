@@ -24,11 +24,14 @@ struct Uniforms {
   scale_y:    f32,   // half-height of the view in complex units (= scale)
   max_iter:   u32,
   ref_iters:  u32,   // length of the reference orbit (<= max_iter+1)
-  // (ref - view_centre) in complex coords. We add this to the per-pixel dc
+  // (ref - view_centre) in complex coords. Added (negated) to per-pixel dc
   // so the perturbation is taken around the chosen reference, not the view
-  // centre. Stored as f32: at deep zoom this offset is small (~ scale) so
-  // f32 precision is fine.
+  // centre. f32 is fine here because at deep zoom this is small (~ scale).
   ref_off:    vec2f,
+  // The reference point itself, in absolute complex coords. Used by the
+  // post-perturbation f32 fallback so we can keep iterating if the
+  // reference orbit runs out before this pixel escapes.
+  ref_c:      vec2f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> ref_orbit: array<vec2f>;
@@ -82,6 +85,32 @@ fn sample_at(fragxy: vec2f) -> vec3f {
     let new_dzy = 2.0 * (Z.x * dzy + Z.y * dzx) + 2.0 * dzx * dzy        + dcy;
     dzx = new_dzx;
     dzy = new_dzy;
+  }
+
+  // If the reference orbit ran out before this pixel escaped, keep going
+  // in plain f32 from the current true orbit position. c is reconstructed
+  // as ref_c + dc; this is f32-precise for moderate zooms (where the user
+  // typically navigates) and avoids the giant black-blob glitches that
+  // would otherwise appear wherever the reference dies young.
+  if (iter >= u.max_iter && u.ref_iters < u.max_iter) {
+    let lastZ = ref_orbit[u.ref_iters - 1u];
+    var zx = lastZ.x + dzx;
+    var zy = lastZ.y + dzy;
+    let cx = u.ref_c.x + dcx;
+    let cy = u.ref_c.y + dcy;
+    for (var n: u32 = u.ref_iters; n < u.max_iter; n = n + 1u) {
+      let zx2 = zx * zx;
+      let zy2 = zy * zy;
+      if (zx2 + zy2 > 65536.0) {
+        iter = n;
+        final_zx = zx;
+        final_zy = zy;
+        break;
+      }
+      let nzy = 2.0 * zx * zy + cy;
+      zx = zx2 - zy2 + cx;
+      zy = nzy;
+    }
   }
 
   if (iter >= u.max_iter) { return vec3f(0.0); }
@@ -143,7 +172,7 @@ export async function createWebGpuRenderer(canvas) {
     primitive: { topology: "triangle-list" },
   });
 
-  const uniformSize = 32; // see WGSL Uniforms layout
+  const uniformSize = 48; // see WGSL Uniforms layout (multiple of 16)
   const uniformBuf = device.createBuffer({
     size: uniformSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -193,6 +222,10 @@ export async function createWebGpuRenderer(canvas) {
       // ref_off = ref - view_centre, in complex coords.
       fView[6] = refCx - cx;
       fView[7] = refCy - cy;
+      // ref_c = the actual reference point.
+      fView[8] = refCx;
+      fView[9] = refCy;
+      // fView[10], fView[11] = padding
       device.queue.writeBuffer(uniformBuf, 0, cpuUniform);
 
       // Upload reference orbit (clipped to REF_MAX).

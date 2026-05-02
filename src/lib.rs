@@ -93,25 +93,22 @@ fn mandelbrot_iter(cx: f64, cy: f64, max_iter: u32) -> (u32, f64, f64) {
 }
 
 /// Compute a high-precision reference orbit for perturbation-theory
-/// rendering on the GPU. Returns `[zx0, zy0, zx1, zy1, ...]` as f32s,
-/// with iteration count = `len() / 2`.
+/// rendering on the GPU. Returns header `[ref_cx, ref_cy]` followed by
+/// `[zx0, zy0, zx1, zy1, ...]`, all as f32. Iteration count = (len-2)/2.
 ///
-/// `cx, cy, scale, aspect` describe the view rectangle. We probe a small
-/// grid of candidate centres inside it and pick whichever yields the
-/// longest reference orbit, so that pixels in the deepest part of the
-/// view (typically near the boundary) have a long reference to perturb
-/// against. Returns the chosen `[ref_cx, ref_cy]` as the first two f32s,
-/// then the orbit values.
+/// We probe a grid of candidate centres inside the view and pick the
+/// longest-lived orbit (preferring ones that hit `max_iter`, i.e. land
+/// inside the set, since they make perfect perturbation references).
 #[wasm_bindgen]
 pub fn reference_orbit(cx: f64, cy: f64, scale: f64, aspect: f64, max_iter: u32) -> Vec<f32> {
-    // Candidate grid: 5x5 over the view.
     let mut best_cx = cx;
     let mut best_cy = cy;
     let mut best_n = 0u32;
-    const GRID: i32 = 5;
+    // 9x9 = 81 samples; cheap (~ms at max_iter=512) and finds in-set
+    // references reliably for any view that contains some of the set.
+    const GRID: i32 = 9;
     for gy in 0..GRID {
         for gx in 0..GRID {
-            // Map (gx, gy) → (-1..1, -1..1) inclusive
             let ux = (gx as f64) / ((GRID - 1) as f64) * 2.0 - 1.0;
             let uy = (gy as f64) / ((GRID - 1) as f64) * 2.0 - 1.0;
             let pcx = cx + ux * scale * aspect;
@@ -121,13 +118,13 @@ pub fn reference_orbit(cx: f64, cy: f64, scale: f64, aspect: f64, max_iter: u32)
                 best_n = n;
                 best_cx = pcx;
                 best_cy = pcy;
+                if n >= max_iter { break; } // can't do better than full length
             }
         }
+        if best_n >= max_iter { break; }
     }
 
     let mut out: Vec<f32> = Vec::with_capacity(2 + 2 * (max_iter as usize + 1));
-    // Header: chosen reference point (so JS can subtract it from the view centre
-    // to get the pixel-relative offset for the shader).
     out.push(best_cx as f32);
     out.push(best_cy as f32);
 
