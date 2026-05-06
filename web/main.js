@@ -178,7 +178,15 @@ function getReferenceOrbit(cx, cy, scale, aspect, maxIter) {
     && cachedRef.key === key
     && cachedRef.absCx >= cx - halfX && cachedRef.absCx <= cx + halfX
     && cachedRef.absCy >= cy - halfY && cachedRef.absCy <= cy + halfY;
-  if (!(inView && cachedRef.triedMaxIter >= maxIter)) {
+  // The series-approximation polynomial is sized for the worst-case |dpix|
+  // at the time the orbit was built. Reusing it at a larger view (zoom-out
+  // or aspect widening) would let pixels exceed the bound the cubic term
+  // was validated against, producing wrong colours. Recompute whenever the
+  // current view has grown past the cached one.
+  const fitsCachedR = cachedRef
+    && halfX <= cachedRef.halfX
+    && halfY <= cachedRef.halfY;
+  if (!(inView && fitsCachedR && cachedRef.triedMaxIter >= maxIter)) {
     let orbit;
     if (fractal === 1) {
       orbit = julia_reference(cx, cy, scale, aspect, jc.x, jc.y, maxIter);
@@ -190,6 +198,8 @@ function getReferenceOrbit(cx, cy, scale, aspect, maxIter) {
     cachedRef = {
       absCx: cx + orbit[0],
       absCy: cy + orbit[1],
+      halfX,
+      halfY,
       triedMaxIter: maxIter,
       orbit,
       key,
@@ -249,8 +259,16 @@ function draw(quality = "high") {
   let tag = backend;
   if (backend === "webgpu" && webgpu && webgpu.lastPrecision) tag = `webgpu/${webgpu.lastPrecision()}`;
   if (backend === "cpu" && quality === "low") tag = "cpu preview";
+  // For the perturbation backend, surface the series-approximation skip
+  // count when it engages — useful for confirming SA is actually firing
+  // at deep zoom, where it's the dominant speedup.
+  let saTag = "";
+  if (backend === "webgpu" && cachedRef) {
+    const saSkip = cachedRef.orbit[2] | 0;
+    if (saSkip > 0) saTag = ` · sa=${saSkip}`;
+  }
   status.textContent =
-    `${w}×${h} · ${tag} · iter=${maxIter} · scale=${view.scale.toExponential(2)} · ${dt.toFixed(1)} ms`;
+    `${w}×${h} · ${tag} · iter=${maxIter} · scale=${view.scale.toExponential(2)}${saTag} · ${dt.toFixed(1)} ms`;
 }
 
 function activeCanvas() {

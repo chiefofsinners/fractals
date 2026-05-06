@@ -33,9 +33,17 @@ struct Uniforms {
   // per pixel, c is the constant 'jc'), 2 = Burning Ship (folded square,
   // z0 = 0, c varies per pixel; uses sign(Z) to track abs perturbation).
   mode:       u32,
-  _pad0:      u32,
+  // Series approximation: skip the first sa_skip iterations using the
+  // cubic polynomial dz_skip = ((sa_c·dpix + sa_b)·dpix + sa_a)·dpix.
+  // Coefficients are computed in f64 on the CPU for the worst-case |dpix|
+  // in the view, so they're valid for every pixel. 0 = no skip (Burning
+  // Ship, deep zoom past coefficient overflow, or skip < 8 not worth it).
+  sa_skip:    u32,
   jc:         vec2f,
-  _pad1:      vec2f,
+  sa_a:       vec2f,
+  sa_b:       vec2f,
+  sa_c:       vec2f,
+  _pad:       vec2f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> ref_orbit: array<vec2f>;
@@ -76,12 +84,56 @@ fn sample_at(fragxy: vec2f) -> vec3f {
   let addx: f32 = select(dpx, 0.0, u.mode == 1u);
   let addy: f32 = select(dpy, 0.0, u.mode == 1u);
 
+  // Mandelbrot main-cardioid and period-2 bulb test. Reconstruct true c
+  // (= reference c + dc) and short-circuit pixels known to be in the set.
+  // Past ~scale 1e-7 the f32 reconstruction loses meaningful digits, but
+  // the test is smooth-region-only — a tiny precision wobble can't cross
+  // the boundary, so false positives are not possible at any zoom.
+  if (u.mode == 0u) {
+    let refC = ref_orbit[1u];
+    let cx = refC.x + dpx;
+    let cy = refC.y + dpy;
+    let xm = cx - 0.25;
+    let q = xm * xm + cy * cy;
+    if (q * (q + xm) <= 0.25 * cy * cy) { return vec3f(0.0); }
+    let xp1 = cx + 1.0;
+    if (xp1 * xp1 + cy * cy <= 0.0625) { return vec3f(0.0); }
+  }
+
   var iter: u32 = u.max_iter;
   var final_zx: f32 = 0.0;
   var final_zy: f32 = 0.0;
 
+  // Series approximation. If the CPU supplied a usable polynomial, replace
+  // the first u.sa_skip perturbation iterations with one Horner-form cubic
+  // evaluation per pixel. The CPU has already verified the cubic term stays
+  // negligible at the worst-case |dpix| in the view, so this is exact to f32.
+  var start_n: u32 = 0u;
+  if (u.sa_skip > 0u && u.sa_skip < u.ref_iters && u.sa_skip < u.max_iter) {
+    let dx = dpx;
+    let dy = dpy;
+    // ((C·d + B)·d + A)·d
+    var t_x = u.sa_c.x * dx - u.sa_c.y * dy + u.sa_b.x;
+    var t_y = u.sa_c.x * dy + u.sa_c.y * dx + u.sa_b.y;
+    let t2_x = t_x * dx - t_y * dy + u.sa_a.x;
+    let t2_y = t_x * dy + t_y * dx + u.sa_a.y;
+    dzx = t2_x * dx - t2_y * dy;
+    dzy = t2_x * dy + t2_y * dx;
+    start_n = u.sa_skip;
+  }
+
+  // Periodicity detection: snapshot the true z = Z + dz every 32 iterations
+  // and compare on intermediate steps. If two snapshots come within 1e-5
+  // of each other the orbit is in a cycle, so the pixel is in-set. Catches
+  // deep-interior pixels the cardioid test misses (minibrots, secondary bulbs,
+  // arbitrary-period attractors). Chaotic orbits separate exponentially so a
+  // loose epsilon distinguishes them reliably.
+  var snap_zx: f32 = 0.0;
+  var snap_zy: f32 = 0.0;
+  var snap_set: bool = false;
+
   let limit = min(u.max_iter, u.ref_iters);
-  for (var n: u32 = 0u; n < limit; n = n + 1u) {
+  for (var n: u32 = start_n; n < limit; n = n + 1u) {
     let Z = ref_orbit[n];
     // True orbit at this pixel = Z + dz. Bail out using its magnitude.
     let zx = Z.x + dzx;
@@ -92,6 +144,17 @@ fn sample_at(fragxy: vec2f) -> vec3f {
       final_zx = zx;
       final_zy = zy;
       break;
+    }
+    if ((n & 31u) == 0u || n == start_n) {
+      snap_zx = zx;
+      snap_zy = zy;
+      snap_set = true;
+    } else if (snap_set) {
+      let pdx = zx - snap_zx;
+      let pdy = zy - snap_zy;
+      if (pdx * pdx + pdy * pdy < 1.0e-10) {
+        return vec3f(0.0);
+      }
     }
     if (u.mode == 2u) {
       // Burning Ship perturbation. Reference recurrence is
@@ -242,9 +305,9 @@ export async function createWebGpuRenderer(canvas) {
     primitive: { topology: "triangle-list" },
   });
 
-  // Uniforms layout (see WGSL): 32B base + mode/_pad0 (8B) + jc/_pad1 (16B) = 56B,
-  // padded up to a 16B multiple = 64B.
-  const uniformSize = 64;
+  // Uniforms layout (see WGSL): 32B base + mode/sa_skip (8B) + jc (8B)
+  // + sa_a/sa_b/sa_c (24B) + _pad (8B) = 80B (already a 16B multiple).
+  const uniformSize = 80;
   const uniformBuf = device.createBuffer({
     size: uniformSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -285,8 +348,22 @@ export async function createWebGpuRenderer(canvas) {
       // there (instead of reading the f32 ref_off baked into the orbit
       // header) keeps precision when reusing a cached orbit across pans
       // and zooms, which matters past ~scale 1e-7.
-      const orbitData = refOrbit.subarray(2);
+      // Header layout: see Rust ORBIT_HEADER_LEN.
+      //   [0,1] ref_off (read by main.js as f64-corrected refOffX/refOffY)
+      //   [2]   sa_skip (u32, stored as f32)
+      //   [3]   _pad
+      //   [4..10] sa_a, sa_b, sa_c (vec2f each)
+      //   [10..] reference orbit (zx0, zy0, zx1, zy1, ...)
+      const orbitData = refOrbit.subarray(10);
       const refIters = Math.min(REF_MAX, orbitData.length / 2);
+      const saSkipRaw = (refOrbit[2] | 0);
+      // Guard: the SA polynomial assumes the loop runs from sa_skip onward,
+      // so it must be < ref_iters and < maxIter. The Rust side already caps
+      // skip < orbit_length, but maxIter can drop below it (e.g. when the
+      // user lowers the iteration cap mid-session and we still hold a cache
+      // computed at a higher cap).
+      const saSkip = (saSkipRaw > 0 && saSkipRaw < refIters && saSkipRaw < maxIter)
+        ? saSkipRaw : 0;
 
       fView[0] = width;
       fView[1] = height;
@@ -297,10 +374,16 @@ export async function createWebGpuRenderer(canvas) {
       fView[6] = refOffX;        // ref_off.x
       fView[7] = refOffY;        // ref_off.y
       uView[8] = mode | 0;       // 0 = Mandelbrot, 1 = Julia, 2 = Burning Ship
-      // uView[9] = _pad0
+      uView[9] = saSkip | 0;     // sa_skip
       fView[10] = jcx;           // jc.x
       fView[11] = jcy;           // jc.y
-      // fView[12..15] = _pad1
+      fView[12] = refOrbit[4];   // sa_a.x
+      fView[13] = refOrbit[5];   // sa_a.y
+      fView[14] = refOrbit[6];   // sa_b.x
+      fView[15] = refOrbit[7];   // sa_b.y
+      fView[16] = refOrbit[8];   // sa_c.x
+      fView[17] = refOrbit[9];   // sa_c.y
+      // fView[18..19] = _pad
       device.queue.writeBuffer(uniformBuf, 0, cpuUniform);
 
       // Upload reference orbit (clipped to REF_MAX).
