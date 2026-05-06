@@ -421,6 +421,21 @@
           const label = csel.querySelector('.csel__label');
           const options = csel.querySelectorAll('.csel__option');
 
+          function syncFromNative() {
+            const val = nativeSelect.value;
+            options.forEach(o => {
+              const nativeOpt = nativeSelect.querySelector(`option[value="${o.dataset.value}"]`);
+              const disabled = !!(nativeOpt && nativeOpt.disabled);
+              const active = o.dataset.value === val;
+              o.disabled = disabled;
+              o.setAttribute('aria-disabled', String(disabled));
+              o.setAttribute('aria-selected', String(active));
+            });
+            if (nativeSelect.selectedOptions && nativeSelect.selectedOptions.length > 0) {
+              label.textContent = nativeSelect.selectedOptions[0].textContent;
+            }
+          }
+
           function open() {
             csel.dataset.open = '';
             trigger.setAttribute('aria-expanded', 'true');
@@ -432,6 +447,9 @@
           function toggle() { csel.hasAttribute('data-open') ? close() : open(); }
 
           function select(value) {
+            const prev = nativeSelect.value;
+            const nativeOpt = nativeSelect.querySelector(`option[value="${value}"]`);
+            if (!nativeOpt || nativeOpt.disabled) return;
             options.forEach(o => {
               const active = o.dataset.value === value;
               o.setAttribute('aria-selected', String(active));
@@ -439,20 +457,19 @@
             const chosen = csel.querySelector(`.csel__option[data-value="${value}"]`);
             if (chosen) label.textContent = chosen.textContent;
             nativeSelect.value = value;
-            nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            if (prev !== value) {
+              nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            }
             close();
           }
 
           // Also sync back if main.js changes nativeSelect.value directly
           // (e.g. boot() disabling WebGPU and falling back to webgl).
-          nativeSelect.addEventListener('change', () => {
-            const val = nativeSelect.value;
-            options.forEach(o => {
-              o.setAttribute('aria-selected', String(o.dataset.value === val));
-            });
-            const chosen = csel.querySelector(`.csel__option[data-value="${val}"]`);
-            if (chosen) label.textContent = chosen.textContent;
-          });
+          nativeSelect.addEventListener('change', syncFromNative);
+
+          // Initial sync from the native select so HTML option order/selected
+          // stays the source of truth for both desktop and mobile controls.
+          syncFromNative();
 
           trigger.addEventListener('click', e => { e.stopPropagation(); toggle(); });
           options.forEach(o => o.addEventListener('click', () => select(o.dataset.value)));
