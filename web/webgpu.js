@@ -184,12 +184,11 @@ fn sample_at(fragxy: vec2f) -> vec3f {
 
   let logZn = 0.5 * log(final_zx * final_zx + final_zy * final_zy);
   let nu = log(logZn / log(2.0)) / log(2.0);
-  let smoothI = f32(iter) + 1.0 - nu;
-  var t = clamp(smoothI / f32(u.max_iter), 0.0, 1.0);
-  // Julia and Burning Ship escape fast across most pixels; gamma-compress
-  // so the narrow iteration range still spans the palette. (Mandelbrot
-  // keeps the linear mapping it's always had.)
-  if (u.mode == 1u || u.mode == 2u) { t = sqrt(t); }
+  let smoothI = max(f32(iter) + 1.0 - nu, 0.0);
+  // Logarithmic mapping so the palette spans its full range regardless
+  // of max_iter — linear smoothI / max_iter bunches everything at the
+  // start of the palette when the user raises the iteration cap.
+  let t = clamp(log(smoothI + 1.0) / log(f32(u.max_iter) + 1.0), 0.0, 1.0);
   return palette(t);
 }
 

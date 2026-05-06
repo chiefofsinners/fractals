@@ -81,11 +81,12 @@ void main() {
   } else {
     float logZn = 0.5 * log(zx2 + zy2);
     float nu = log(logZn / log(2.0)) / log(2.0);
-    float smooth_i = float(i) + 1.0 - nu;
-    float t = clamp(smooth_i / float(u_maxIter), 0.0, 1.0);
-    // Burning Ship and Julia escape very fast; gamma-compress so the few
-    // low iteration counts still span the palette.
-    if (u_mode == 1 || u_mode == 2) t = sqrt(t);
+    float smooth_i = max(float(i) + 1.0 - nu, 0.0);
+    // Logarithmic mapping so the palette spans its full range regardless
+    // of u_maxIter — linear smooth_i / u_maxIter bunches everything at
+    // the start of the palette when the user raises the iteration cap.
+    float t = clamp(log(smooth_i + 1.0) / log(float(u_maxIter) + 1.0),
+                    0.0, 1.0);
     outColor = vec4(palette(t), 1.0);
   }
 }

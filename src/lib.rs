@@ -47,7 +47,7 @@ pub fn render_mandelbrot(
                 let log_zn = (zx * zx + zy * zy).ln() * 0.5;
                 let nu = (log_zn / std::f64::consts::LN_2).log2();
                 let smooth = iter as f64 + 1.0 - nu;
-                let t = (smooth / max_iter as f64).clamp(0.0, 1.0);
+                let t = colour_t(smooth, max_iter);
                 let (r, g, b) = palette(t);
                 buf[idx] = r;
                 buf[idx + 1] = g;
@@ -97,9 +97,7 @@ pub fn render_julia(
                 let log_zn = (zx * zx + zy * zy).ln() * 0.5;
                 let nu = (log_zn / std::f64::consts::LN_2).log2();
                 let smooth = iter as f64 + 1.0 - nu;
-                // Julia escapes quickly across most c values; gamma-compress
-                // so low iteration counts span the palette.
-                let t = (smooth / max_iter as f64).clamp(0.0, 1.0).sqrt();
+                let t = colour_t(smooth, max_iter);
                 let (r, g, b) = palette(t);
                 buf[idx] = r; buf[idx + 1] = g; buf[idx + 2] = b;
             }
@@ -149,9 +147,7 @@ pub fn render_burning_ship(
                 let log_zn = (zx * zx + zy * zy).ln() * 0.5;
                 let nu = (log_zn / std::f64::consts::LN_2).log2();
                 let smooth = iter as f64 + 1.0 - nu;
-                // Burning Ship escapes very quickly; gamma-compress the
-                // iteration count so low-escape pixels span the palette.
-                let t = (smooth / max_iter as f64).clamp(0.0, 1.0).sqrt();
+                let t = colour_t(smooth, max_iter);
                 let (r, g, b) = palette(t);
                 buf[idx] = r; buf[idx + 1] = g; buf[idx + 2] = b;
             }
@@ -432,6 +428,18 @@ fn orbit_length(cx: f64, cy: f64, max_iter: u32) -> u32 {
         zy = nzy;
     }
     max_iter
+}
+
+/// Map a smooth iteration count to `t ∈ [0, 1]` for palette lookup.
+///
+/// Logarithmic so the palette spans the full range regardless of
+/// `max_iter`: linear `smooth/max_iter` bunches everything at the start
+/// of the palette when the user cranks the iteration cap up, since most
+/// pixels still escape in tens of iterations.
+#[inline]
+fn colour_t(smooth: f64, max_iter: u32) -> f64 {
+    let s = smooth.max(0.0);
+    (s + 1.0).ln() / ((max_iter as f64) + 1.0).ln()
 }
 
 /// Cosine-based color palette ("IQ palette"). `t` in [0, 1].
