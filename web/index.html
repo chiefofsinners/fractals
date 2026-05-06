@@ -354,7 +354,15 @@
       <canvas id="gpu"></canvas>
       <canvas id="canvas"></canvas>
       <canvas id="axes"></canvas>
-      <p class="hint">Tap/pinch to zoom · drag to pan · shift-click to zoom out</p>
+      <p class="hint" id="hint"></p>
+      <script>
+        (function () {
+          var touch = window.matchMedia('(pointer: coarse)').matches;
+          document.getElementById('hint').textContent = touch
+            ? 'Pinch to zoom · drag to pan'
+            : 'Scroll to zoom · drag to pan · click to zoom in · shift-click to zoom out';
+        })();
+      </script>
     </main>
     <script>
       // Custom select dropdowns — wired to the hidden native <select> elements
