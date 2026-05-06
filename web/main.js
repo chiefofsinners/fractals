@@ -366,6 +366,7 @@ const pointers = new Map(); // id -> {x, y}
 let panAnchor = null;       // {clientX, clientY, viewCx, viewCy} for 1-finger pan
 let pinchAnchor = null;     // {dist, midX, midY, viewCx, viewCy, scale} for 2-finger
 let dragMoved = false;
+let lastPointerType = "mouse";
 
 function pointerCenter() {
   let sx = 0, sy = 0;
@@ -385,6 +386,7 @@ surface.addEventListener("pointerdown", (e) => {
   surface.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   dragMoved = false;
+  lastPointerType = e.pointerType;
   reanchor();
 });
 
@@ -471,7 +473,7 @@ surface.addEventListener("click", (e) => {
   if (dragMoved) return; // don't zoom after a pan / pinch
   // Suppress click-zoom on touch devices — they have pinch instead, and a
   // tap-to-zoom would fight with double-tap behaviours.
-  if (e.pointerType === "touch") return;
+  if (e.pointerType === "touch" || lastPointerType === "touch") return;
   const rect = surface.getBoundingClientRect();
   const p = pixelToComplex(e.clientX - rect.left, e.clientY - rect.top);
   view.cx = p.x;
