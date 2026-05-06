@@ -55,9 +55,10 @@
           --option-selected-bg: rgba(26,108,212,0.08);
         }
       }
+      *, *::before, *::after { -webkit-tap-highlight-color: transparent; }
       html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
         font-family: system-ui, -apple-system, sans-serif; overflow: hidden;
-        -webkit-text-size-adjust: 100%; }
+        -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
       body { display: flex; flex-direction: column; height: 100vh;
         height: 100dvh; padding-top: env(safe-area-inset-top);
         padding-left: env(safe-area-inset-left);
@@ -96,16 +97,15 @@
         border: 1px solid var(--border); border-radius: var(--radius);
         padding: 0.3rem 0.6rem 0.3rem 0.7rem; min-height: 2rem;
         cursor: pointer; white-space: nowrap; user-select: none;
+        -webkit-tap-highlight-color: transparent;
         transition: border-color var(--transition), box-shadow var(--transition);
       }
       .csel__trigger:hover { border-color: #4a5568; }
       .csel__trigger:focus-visible {
-        outline: none; border-color: var(--accent);
-        box-shadow: 0 0 0 3px rgba(77,166,255,0.18);
+        outline: none; border-color: var(--text-muted);
       }
       .csel[data-open] .csel__trigger {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px rgba(77,166,255,0.18);
+        border-color: var(--text-muted);
       }
       .csel__chevron { flex-shrink: 0; opacity: 0.5;
         transition: transform var(--transition); }
@@ -144,8 +144,7 @@
       }
       header input[type="number"]:hover { border-color: #4a5568; }
       header input[type="number"]:focus {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px rgba(77,166,255,0.18);
+        border-color: var(--text-muted);
       }
       header input[type="number"] { width: 6rem; }
       #juliaControls input[type="number"] { width: 5.2rem; }
@@ -154,8 +153,29 @@
       header input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
       header input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
-      /* ── Reset button (direct child only, so .csel buttons are unaffected) */
-      header > button {
+      /* ── Controls wrapper — transparent on desktop ───────────────────── */
+      #controls { display: contents; }
+
+      /* ── Controls toggle button (mobile-only) ───────────────────────── */
+      #controlsToggle {
+        display: none;
+        margin-left: auto;
+        align-items: center;
+        justify-content: center;
+        padding: 0.3rem 0.55rem; min-height: 2rem;
+        background: var(--surface-raised);
+        border: 1px solid var(--border); border-radius: var(--radius);
+        color: var(--text); cursor: pointer;
+        transition: background var(--transition), border-color var(--transition), color var(--transition);
+      }
+      #controlsToggle:hover { background: var(--btn-hover-bg); border-color: var(--text-muted); }
+      #controlsToggle[aria-expanded="true"] {
+        border-color: var(--text); background: var(--btn-hover-bg);
+        font-weight: 700;
+      }
+
+      /* ── Reset button ─────────────────────────────────────────────────── */
+      header > button, #reset {
         font: inherit; font-size: 0.82rem; font-weight: 600;
         padding: 0.3rem 0.85rem; min-height: 2rem;
         background: var(--surface-raised);
@@ -164,20 +184,19 @@
         border-radius: var(--radius);
         cursor: pointer;
         letter-spacing: 0.02em;
+        -webkit-tap-highlight-color: transparent;
         transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
       }
-      header > button:hover {
+      header > button:hover, #reset:hover {
         background: var(--btn-hover-bg);
         border-color: var(--text-muted);
       }
-      header > button:active {
-        background: var(--accent-dim);
-        border-color: var(--accent);
-        color: #fff;
+      header > button:active, #reset:active {
+        background: var(--btn-hover-bg);
+        border-color: var(--text-muted);
       }
-      header > button:focus-visible {
+      header > button:focus-visible, #reset:focus-visible {
         outline: none;
-        box-shadow: 0 0 0 3px rgba(77, 166, 255, 0.25);
       }
 
       /* ── Toggle checkbox ─────────────────────────────────────────── */
@@ -242,7 +261,7 @@
         background: #fff;
       }
       header input[type="checkbox"]:focus-visible {
-        box-shadow: 0 0 0 3px rgba(77, 166, 255, 0.25);
+        outline: none;
       }
       /* Undo the bad ::after trick above */
       header label:has(input[type="checkbox"])::after,
@@ -277,13 +296,28 @@
 
       /* ── Mobile / narrow viewports ──────────────────────────────── */
       @media (max-width: 720px), (pointer: coarse) {
-        header { padding: 0.45rem 0.65rem; gap: 0.45rem 0.7rem; }
+        header { padding: 0.45rem 0.65rem; gap: 0.45rem 0.7rem; position: relative; }
+        #controlsToggle { display: inline-flex; }
+        #controls {
+          display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: center;
+          position: absolute; top: 100%; left: 0; right: 0;
+          background: var(--surface); border-bottom: 1px solid var(--border);
+          padding: 0.6rem 0.65rem;
+          z-index: 50;
+          /* hidden state */
+          visibility: hidden; opacity: 0; transform: translateY(-0.4rem);
+          transition: opacity 180ms ease, transform 180ms ease, visibility 0s 180ms;
+        }
+        #controls.open {
+          visibility: visible; opacity: 1; transform: translateY(0);
+          transition: opacity 180ms ease, transform 180ms ease;
+        }
         header h1 .long { display: none; }
         header h1 .short { display: inline; }
         header label { font-size: 0.9rem; }
         .csel__trigger,
         header input[type="number"],
-        header > button {
+        header > button, #reset {
           font-size: 1rem; min-height: 2.4rem;
           padding: 0.4rem 0.65rem;
         }
@@ -301,7 +335,16 @@
   </head>
   <body>
     <header>
-      <h1><span class="long">Fractal Beauty</span><span class="short">Fractal Beauty</span></h1>      <label>Fractal
+      <h1><span class="long">Fractal Beauty</span><span class="short">Fractal Beauty</span></h1>
+      <button id="controlsToggle" aria-label="Controls" aria-expanded="false">
+        <svg width="20" height="20" viewBox="0 0 24 22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <line x1="0" y1="3" x2="24" y2="3"/><line x1="0" y1="11" x2="24" y2="11"/><line x1="0" y1="19" x2="24" y2="19"/>
+          <circle cx="7" cy="3" r="2.5" fill="var(--surface-raised)" stroke="currentColor"/>
+          <circle cx="16" cy="11" r="2.5" fill="var(--surface-raised)" stroke="currentColor"/>
+          <circle cx="9" cy="19" r="2.5" fill="var(--surface-raised)" stroke="currentColor"/>
+        </svg>
+      </button>
+      <div id="controls"><label>Fractal
         <select id="fractal">
           <option value="mandelbrot" selected>Mandelbrot</option>
           <option value="julia">Julia</option>
@@ -347,6 +390,7 @@
         </div>
       </label>
       <button id="reset">Reset</button>
+      </div>
       <span id="status">loading…</span>
     </header>
     <main>
@@ -432,11 +476,39 @@
             delete c.dataset.open;
             c.querySelector('.csel__trigger').setAttribute('aria-expanded', 'false');
           });
+          // Also close the mobile controls panel on outside tap
+          const controls = document.getElementById('controls');
+          const toggle = document.getElementById('controlsToggle');
+          if (controls && controls.classList.contains('open')) {
+            controls.classList.remove('open');
+            toggle.setAttribute('aria-expanded', 'false');
+          }
         });
 
         document.querySelectorAll('.csel').forEach(initCsel);
       })();
     </script>
     <script type="module" src="./main.js"></script>
-  </body>
+    <script>
+      // Controls panel toggle (mobile)
+      (function () {
+        const toggle = document.getElementById('controlsToggle');
+        const controls = document.getElementById('controls');
+        if (!toggle) return;
+        toggle.addEventListener('click', function (e) {
+          e.stopPropagation(); // prevent the outside-click handler from immediately closing it
+          const open = controls.classList.toggle('open');
+          toggle.setAttribute('aria-expanded', String(open));
+          if (!open) {
+            // Close any open dropdowns inside the panel
+            controls.querySelectorAll('.csel[data-open]').forEach(function (c) {
+              delete c.dataset.open;
+              c.querySelector('.csel__trigger').setAttribute('aria-expanded', 'false');
+            });
+          }
+        });
+        // Also stop clicks inside the panel from bubbling to the outside-click handler
+        controls.addEventListener('click', function (e) { e.stopPropagation(); });
+      })();
+    </script>
 </html>
