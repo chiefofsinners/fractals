@@ -97,7 +97,9 @@ pub fn render_julia(
                 let log_zn = (zx * zx + zy * zy).ln() * 0.5;
                 let nu = (log_zn / std::f64::consts::LN_2).log2();
                 let smooth = iter as f64 + 1.0 - nu;
-                let t = (smooth / max_iter as f64).clamp(0.0, 1.0);
+                // Julia escapes quickly across most c values; gamma-compress
+                // so low iteration counts span the palette.
+                let t = (smooth / max_iter as f64).clamp(0.0, 1.0).sqrt();
                 let (r, g, b) = palette(t);
                 buf[idx] = r; buf[idx + 1] = g; buf[idx + 2] = b;
             }
@@ -105,6 +107,77 @@ pub fn render_julia(
         }
     }
     buf
+}
+
+/// Render the Burning Ship fractal into RGBA. Same viewport convention
+/// as `render_mandelbrot`. Recurrence:
+///
+///     z_{n+1} = (|Re z_n| + i |Im z_n|)^2 + c,   z_0 = 0
+///
+/// Note that with our screen convention (increasing screen-y maps to
+/// increasing complex-y) the canonical "ship" silhouette appears upright
+/// when centred near (-0.5, -0.5).
+#[wasm_bindgen]
+pub fn render_burning_ship(
+    width: u32,
+    height: u32,
+    center_x: f64,
+    center_y: f64,
+    scale: f64,
+    max_iter: u32,
+) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut buf = vec![0u8; w * h * 4];
+
+    let aspect = width as f64 / height as f64;
+    let x_min = center_x - scale * aspect;
+    let y_min = center_y - scale;
+    let dx = (scale * aspect * 2.0) / width as f64;
+    let dy = (scale * 2.0) / height as f64;
+
+    for py in 0..h {
+        let cy = y_min + py as f64 * dy;
+        for px in 0..w {
+            let cx = x_min + px as f64 * dx;
+            let (iter, zx, zy) = burning_ship_iter(cx, cy, max_iter);
+
+            let idx = (py * w + px) * 4;
+            if iter >= max_iter {
+                buf[idx] = 0; buf[idx + 1] = 0; buf[idx + 2] = 0;
+            } else {
+                let log_zn = (zx * zx + zy * zy).ln() * 0.5;
+                let nu = (log_zn / std::f64::consts::LN_2).log2();
+                let smooth = iter as f64 + 1.0 - nu;
+                // Burning Ship escapes very quickly; gamma-compress the
+                // iteration count so low-escape pixels span the palette.
+                let t = (smooth / max_iter as f64).clamp(0.0, 1.0).sqrt();
+                let (r, g, b) = palette(t);
+                buf[idx] = r; buf[idx + 1] = g; buf[idx + 2] = b;
+            }
+            buf[idx + 3] = 255;
+        }
+    }
+    buf
+}
+
+#[inline]
+fn burning_ship_iter(cx: f64, cy: f64, max_iter: u32) -> (u32, f64, f64) {
+    let mut zx = 0.0f64;
+    let mut zy = 0.0f64;
+    let bailout = (1u64 << 16) as f64;
+    let mut i = 0u32;
+    while i < max_iter {
+        let zx2 = zx * zx;
+        let zy2 = zy * zy;
+        if zx2 + zy2 > bailout { return (i, zx, zy); }
+        // Folded recurrence: take absolute values before the square.
+        let nzy = 2.0 * zx.abs() * zy.abs() + cy;
+        zx = zx2 - zy2 + cx;
+        zy = nzy;
+        i += 1;
+    }
+    (max_iter, zx, zy)
 }
 
 #[inline]
@@ -261,6 +334,74 @@ pub fn julia_reference(cx: f64, cy: f64, scale: f64, aspect: f64, jcx: f64, jcy:
         out.push(zy as f32);
     }
     out
+}
+
+/// Burning Ship reference orbit for the GPU perturbation renderer. Same
+/// buffer layout as `reference_orbit`: `[ref_off_x, ref_off_y, zx0, zy0, ...]`
+/// as f32. Recurrence is the folded Burning Ship one,
+///     z_{n+1} = (|Re z_n| + i |Im z_n|)^2 + c,
+/// computed in f64 for the reference, with z_0 = 0 so Z_1 = c (matching the
+/// Mandelbrot convention; the shader reads `ref_orbit[1]` as the reference c
+/// when extending past the stored orbit).
+#[wasm_bindgen]
+pub fn burning_ship_reference(cx: f64, cy: f64, scale: f64, aspect: f64, max_iter: u32) -> Vec<f32> {
+    let mut best_cx = cx;
+    let mut best_cy = cy;
+    let mut best_n = 0u32;
+    const GRID: i32 = 9;
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let ux = (gx as f64) / ((GRID - 1) as f64) * 2.0 - 1.0;
+            let uy = (gy as f64) / ((GRID - 1) as f64) * 2.0 - 1.0;
+            let pcx = cx + ux * scale * aspect;
+            let pcy = cy + uy * scale;
+            let n = burning_ship_orbit_length(pcx, pcy, max_iter);
+            if n > best_n {
+                best_n = n;
+                best_cx = pcx;
+                best_cy = pcy;
+                if n >= max_iter { break; }
+            }
+        }
+        if best_n >= max_iter { break; }
+    }
+
+    let mut out: Vec<f32> = Vec::with_capacity(2 + 2 * (max_iter as usize + 1));
+    out.push((best_cx - cx) as f32);
+    out.push((best_cy - cy) as f32);
+
+    let mut zx = 0.0f64;
+    let mut zy = 0.0f64;
+    out.push(zx as f32);
+    out.push(zy as f32);
+    let bailout = (1u64 << 16) as f64;
+    for _ in 0..max_iter {
+        let zx2 = zx * zx;
+        let zy2 = zy * zy;
+        if zx2 + zy2 > bailout { break; }
+        let nzy = 2.0 * zx.abs() * zy.abs() + best_cy;
+        zx = zx2 - zy2 + best_cx;
+        zy = nzy;
+        out.push(zx as f32);
+        out.push(zy as f32);
+    }
+    out
+}
+
+#[inline]
+fn burning_ship_orbit_length(cx: f64, cy: f64, max_iter: u32) -> u32 {
+    let mut zx = 0.0f64;
+    let mut zy = 0.0f64;
+    let bailout = (1u64 << 16) as f64;
+    for i in 0..max_iter {
+        let zx2 = zx * zx;
+        let zy2 = zy * zy;
+        if zx2 + zy2 > bailout { return i; }
+        let nzy = 2.0 * zx.abs() * zy.abs() + cy;
+        zx = zx2 - zy2 + cx;
+        zy = nzy;
+    }
+    max_iter
 }
 
 #[inline]

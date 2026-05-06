@@ -30,7 +30,8 @@ struct Uniforms {
   // f32 is plenty for this small offset (|ref_off| <= scale).
   ref_off:    vec2f,
   // 0 = Mandelbrot (z0 = 0, c varies per pixel), 1 = Julia (z0 varies
-  // per pixel, c is the constant 'jc').
+  // per pixel, c is the constant 'jc'), 2 = Burning Ship (folded square,
+  // z0 = 0, c varies per pixel; uses sign(Z) to track abs perturbation).
   mode:       u32,
   _pad0:      u32,
   jc:         vec2f,
@@ -68,10 +69,10 @@ fn sample_at(fragxy: vec2f) -> vec3f {
   let dpx = uv.x * u.scale_x - u.ref_off.x;
   let dpy = uv.y * u.scale_y - u.ref_off.y;
 
-  // Julia: dz starts at the pixel offset; Mandelbrot: dz starts at 0.
+  // Julia: dz starts at the pixel offset; Mandelbrot/Burning Ship: dz starts at 0.
   var dzx: f32 = select(0.0, dpx, u.mode == 1u);
   var dzy: f32 = select(0.0, dpy, u.mode == 1u);
-  // For Mandelbrot, dPix is the per-iteration '+dc'; for Julia, no add.
+  // For Mandelbrot/Burning Ship, dPix is the per-iteration '+dc'; for Julia, no add.
   let addx: f32 = select(dpx, 0.0, u.mode == 1u);
   let addy: f32 = select(dpy, 0.0, u.mode == 1u);
 
@@ -92,11 +93,38 @@ fn sample_at(fragxy: vec2f) -> vec3f {
       final_zy = zy;
       break;
     }
-    // dz_{n+1} = 2*Z*dz + dz^2  (+ dc for Mandelbrot)
-    let new_dzx = 2.0 * (Z.x * dzx - Z.y * dzy) + (dzx * dzx - dzy * dzy) + addx;
-    let new_dzy = 2.0 * (Z.x * dzy + Z.y * dzx) + 2.0 * dzx * dzy        + addy;
-    dzx = new_dzx;
-    dzy = new_dzy;
+    if (u.mode == 2u) {
+      // Burning Ship perturbation. Reference recurrence is
+      //   X' = X^2 - Y^2 + Cx,   Y' = 2|X||Y| + Cy.
+      // dx' is straightforward (the squares are analytic):
+      //   dx' = 2X dx - 2Y dy + dx^2 - dy^2 + dcx.
+      // For dy' the absolute values give an exact identity
+      //   2|x||y| - 2|X||Y|
+      //     = 2 sxy (X dy + Y dx + dx dy)        (no cancellation when small)
+      //     + 2 (sxy - SXY) X Y                  (exactly 0 unless a sign flips)
+      // where SXY = sgn(X) sgn(Y) is the reference sign and sxy = sgn(x) sgn(y)
+      // is the *true* pixel sign (we already have x = X+dx, y = Y+dy from the
+      // bailout test). The correction term cleanly handles glitches near the
+      // axes, where the naive linearisation otherwise produces bright streaks.
+      let SX = select(1.0, -1.0, Z.x < 0.0);
+      let SY = select(1.0, -1.0, Z.y < 0.0);
+      let SXY = SX * SY;
+      let sx = select(1.0, -1.0, zx < 0.0);
+      let sy = select(1.0, -1.0, zy < 0.0);
+      let sxy = sx * sy;
+      let new_dzx = 2.0 * (Z.x * dzx - Z.y * dzy) + (dzx * dzx - dzy * dzy) + addx;
+      let new_dzy = 2.0 * sxy * (Z.x * dzy + Z.y * dzx + dzx * dzy)
+                  + 2.0 * (sxy - SXY) * Z.x * Z.y
+                  + addy;
+      dzx = new_dzx;
+      dzy = new_dzy;
+    } else {
+      // Mandelbrot/Julia: dz_{n+1} = 2*Z*dz + dz^2  (+ dc for Mandelbrot)
+      let new_dzx = 2.0 * (Z.x * dzx - Z.y * dzy) + (dzx * dzx - dzy * dzy) + addx;
+      let new_dzy = 2.0 * (Z.x * dzy + Z.y * dzx) + 2.0 * dzx * dzy        + addy;
+      dzx = new_dzx;
+      dzy = new_dzy;
+    }
   }
 
   // If the reference orbit ran out before this pixel escaped, keep going
@@ -126,9 +154,16 @@ fn sample_at(fragxy: vec2f) -> vec3f {
         final_zy = zy;
         break;
       }
-      let nzy = 2.0 * zx * zy + cy;
-      zx = zx2 - zy2 + cx;
-      zy = nzy;
+      if (u.mode == 2u) {
+        // Burning Ship: fold to |Re|, |Im| before squaring.
+        let nzy = 2.0 * abs(zx) * abs(zy) + cy;
+        zx = zx2 - zy2 + cx;
+        zy = nzy;
+      } else {
+        let nzy = 2.0 * zx * zy + cy;
+        zx = zx2 - zy2 + cx;
+        zy = nzy;
+      }
     }
   }
 
@@ -137,7 +172,11 @@ fn sample_at(fragxy: vec2f) -> vec3f {
   let logZn = 0.5 * log(final_zx * final_zx + final_zy * final_zy);
   let nu = log(logZn / log(2.0)) / log(2.0);
   let smoothI = f32(iter) + 1.0 - nu;
-  let t = clamp(smoothI / f32(u.max_iter), 0.0, 1.0);
+  var t = clamp(smoothI / f32(u.max_iter), 0.0, 1.0);
+  // Julia and Burning Ship escape fast across most pixels; gamma-compress
+  // so the narrow iteration range still spans the palette. (Mandelbrot
+  // keeps the linear mapping it's always had.)
+  if (u.mode == 1u || u.mode == 2u) { t = sqrt(t); }
   return palette(t);
 }
 
@@ -245,7 +284,7 @@ export async function createWebGpuRenderer(canvas) {
       uView[5] = refIters | 0;
       fView[6] = refOffX;        // ref_off.x
       fView[7] = refOffY;        // ref_off.y
-      uView[8] = mode | 0;       // 0 = Mandelbrot, 1 = Julia
+      uView[8] = mode | 0;       // 0 = Mandelbrot, 1 = Julia, 2 = Burning Ship
       // uView[9] = _pad0
       fView[10] = jcx;           // jc.x
       fView[11] = jcy;           // jc.y

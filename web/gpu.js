@@ -14,7 +14,10 @@ uniform vec2  u_resolution;
 uniform vec2  u_center;     // complex-plane center
 uniform float u_scale;      // half-height of viewport in complex plane
 uniform int   u_maxIter;
-// 0 = Mandelbrot (z0 = 0, c = pixel), 1 = Julia (z0 = pixel, c = u_jc).
+// 0 = Mandelbrot, 1 = Julia, 2 = Burning Ship.
+//  Mandelbrot:   z0 = 0,    c = pixel,  z := z^2 + c
+//  Julia:        z0 = pixel, c = u_jc,   z := z^2 + c
+//  Burning Ship: z0 = 0,    c = pixel,  z := (|Re z| + i|Im z|)^2 + c
 uniform int   u_mode;
 uniform vec2  u_jc;
 
@@ -35,23 +38,25 @@ void main() {
   vec2 p = vec2(u_center.x + uv.x * u_scale * aspect,
                 u_center.y - uv.y * u_scale);
 
-  // For Mandelbrot c is the pixel and z0 = 0; for Julia z0 is the pixel
-  // and c is the constant u_jc.
+  // For Mandelbrot/Burning Ship c is the pixel and z0 = 0; for Julia z0
+  // is the pixel and c is the constant u_jc.
   vec2 c, z;
-  if (u_mode == 0) {
-    c = p;
-    z = vec2(0.0);
-    // Cardioid / period-2 bulb early exit (Mandelbrot only).
-    float xm = c.x - 0.25;
-    float q = xm*xm + c.y*c.y;
-    if (q * (q + xm) <= 0.25 * c.y * c.y ||
-        (c.x + 1.0)*(c.x + 1.0) + c.y*c.y <= 0.0625) {
-      outColor = vec4(0.0, 0.0, 0.0, 1.0);
-      return;
-    }
-  } else {
+  if (u_mode == 1) {
     c = u_jc;
     z = p;
+  } else {
+    c = p;
+    z = vec2(0.0);
+    if (u_mode == 0) {
+      // Cardioid / period-2 bulb early exit (Mandelbrot only).
+      float xm = c.x - 0.25;
+      float q = xm*xm + c.y*c.y;
+      if (q * (q + xm) <= 0.25 * c.y * c.y ||
+          (c.x + 1.0)*(c.x + 1.0) + c.y*c.y <= 0.0625) {
+        outColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+      }
+    }
   }
 
   const float BAILOUT = 65536.0;
@@ -62,7 +67,13 @@ void main() {
     zx2 = z.x * z.x;
     zy2 = z.y * z.y;
     if (zx2 + zy2 > BAILOUT) { i = k; break; }
-    z = vec2(zx2 - zy2 + c.x, 2.0 * z.x * z.y + c.y);
+    if (u_mode == 2) {
+      // Burning Ship: fold to |Re|, |Im| before squaring. Squared terms
+      // are unaffected; only the cross term picks up the abs.
+      z = vec2(zx2 - zy2 + c.x, 2.0 * abs(z.x) * abs(z.y) + c.y);
+    } else {
+      z = vec2(zx2 - zy2 + c.x, 2.0 * z.x * z.y + c.y);
+    }
   }
 
   if (i >= u_maxIter) {
@@ -72,6 +83,9 @@ void main() {
     float nu = log(logZn / log(2.0)) / log(2.0);
     float smooth_i = float(i) + 1.0 - nu;
     float t = clamp(smooth_i / float(u_maxIter), 0.0, 1.0);
+    // Burning Ship and Julia escape very fast; gamma-compress so the few
+    // low iteration counts still span the palette.
+    if (u_mode == 1 || u_mode == 2) t = sqrt(t);
     outColor = vec4(palette(t), 1.0);
   }
 }

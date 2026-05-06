@@ -1,4 +1,4 @@
-import init, { render_mandelbrot, render_julia, reference_orbit, julia_reference } from "./pkg/fractals.js";
+import init, { render_mandelbrot, render_julia, render_burning_ship, reference_orbit, julia_reference, burning_ship_reference } from "./pkg/fractals.js";
 import { createGpuRenderer } from "./gpu.js";
 import { createWebGpuRenderer } from "./webgpu.js";
 
@@ -70,11 +70,11 @@ function syncCanvasVisibility(backend) {
 }
 
 const DEFAULT_VIEW = { cx: -0.5, cy: 0.0, scale: 1.25 };
-// Julia sets are centred on the origin; Mandelbrot's natural framing is
-// shifted left so the bulb sits in view.
+// Each fractal has its own natural framing.
 const DEFAULT_VIEWS = {
-  mandelbrot: { cx: -0.5, cy: 0.0, scale: 1.25 },
-  julia:      { cx:  0.0, cy: 0.0, scale: 1.5  },
+  mandelbrot:   { cx: -0.5, cy:  0.0, scale: 1.25 },
+  julia:        { cx:  0.0, cy:  0.0, scale: 1.5  },
+  burning_ship: { cx: -0.5, cy: -0.5, scale: 1.5  },
 };
 let view = { ...DEFAULT_VIEW };
 let ready = false;
@@ -159,8 +159,12 @@ function currentJuliaC() {
   };
 }
 function currentFractal() {
-  // Returns 0 (Mandelbrot) or 1 (Julia).
-  return fractalSelect.value === "julia" ? 1 : 0;
+  // Returns 0 (Mandelbrot), 1 (Julia), or 2 (Burning Ship).
+  switch (fractalSelect.value) {
+    case "julia": return 1;
+    case "burning_ship": return 2;
+    default: return 0;
+  }
 }
 
 function getReferenceOrbit(cx, cy, scale, aspect, maxIter) {
@@ -169,15 +173,20 @@ function getReferenceOrbit(cx, cy, scale, aspect, maxIter) {
   const fractal = currentFractal();
   const jc = currentJuliaC();
   // Cache key: invalidate whenever the fractal type or Julia c changes.
-  const key = fractal === 1 ? `j:${jc.x}:${jc.y}` : "m";
+  const key = fractal === 1 ? `j:${jc.x}:${jc.y}` : (fractal === 2 ? "b" : "m");
   const inView = cachedRef
     && cachedRef.key === key
     && cachedRef.absCx >= cx - halfX && cachedRef.absCx <= cx + halfX
     && cachedRef.absCy >= cy - halfY && cachedRef.absCy <= cy + halfY;
   if (!(inView && cachedRef.triedMaxIter >= maxIter)) {
-    const orbit = fractal === 1
-      ? julia_reference(cx, cy, scale, aspect, jc.x, jc.y, maxIter)
-      : reference_orbit(cx, cy, scale, aspect, maxIter);
+    let orbit;
+    if (fractal === 1) {
+      orbit = julia_reference(cx, cy, scale, aspect, jc.x, jc.y, maxIter);
+    } else if (fractal === 2) {
+      orbit = burning_ship_reference(cx, cy, scale, aspect, maxIter);
+    } else {
+      orbit = reference_orbit(cx, cy, scale, aspect, maxIter);
+    }
     cachedRef = {
       absCx: cx + orbit[0],
       absCy: cy + orbit[1],
@@ -222,9 +231,14 @@ function draw(quality = "high") {
       canvas.width = w;
       canvas.height = h;
     }
-    const pixels = fractal === 1
-      ? render_julia(w, h, view.cx, view.cy, view.scale, jc.x, jc.y, maxIter)
-      : render_mandelbrot(w, h, view.cx, view.cy, view.scale, maxIter);
+    let pixels;
+    if (fractal === 1) {
+      pixels = render_julia(w, h, view.cx, view.cy, view.scale, jc.x, jc.y, maxIter);
+    } else if (fractal === 2) {
+      pixels = render_burning_ship(w, h, view.cx, view.cy, view.scale, maxIter);
+    } else {
+      pixels = render_mandelbrot(w, h, view.cx, view.cy, view.scale, maxIter);
+    }
     const img = new ImageData(new Uint8ClampedArray(pixels), w, h);
     ctx.putImageData(img, 0, 0);
   }
