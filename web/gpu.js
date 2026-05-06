@@ -110,6 +110,13 @@ export function createGpuRenderer(canvas) {
   });
   if (!gl) return null;
 
+  // Some mobile GPUs expose WebGL2 but only low/mediump-like precision in
+  // fragment highp float. Mandelbrot maths then collapses into a blob.
+  const highp = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+  if (!highp || highp.precision < 23 || highp.rangeMax < 127) {
+    return null;
+  }
+
   const vs = compile(gl, gl.VERTEX_SHADER, VERT);
   const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
   const prog = gl.createProgram();
