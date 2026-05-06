@@ -471,9 +471,13 @@ surface.addEventListener("pointercancel", releasePointer);
 
 surface.addEventListener("click", (e) => {
   if (dragMoved) return; // don't zoom after a pan / pinch
-  // Suppress click-zoom on touch devices — they have pinch instead, and a
-  // tap-to-zoom would fight with double-tap behaviours.
-  if (e.pointerType === "touch" || lastPointerType === "touch") return;
+  // Suppress click-zoom for touch/pen taps on mobile/tablet. Some browsers
+  // synthesize click without a reliable pointerType, so we also check
+  // sourceCapabilities and the last pointerdown type.
+  const touchGenerated = !!(e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents);
+  if (touchGenerated) return;
+  if (e.pointerType && e.pointerType !== "mouse") return;
+  if (lastPointerType !== "mouse") return;
   const rect = surface.getBoundingClientRect();
   const p = pixelToComplex(e.clientX - rect.left, e.clientY - rect.top);
   view.cx = p.x;
