@@ -146,12 +146,18 @@ export function createGpuRenderer(canvas) {
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-  // Runtime correctness check: render c=(2,0) to an offscreen 4×4 FBO.
-  // That point escapes in ~4 iterations and must produce a coloured pixel.
-  // Some Android GPUs (Adreno, Mali) claim highp support but silently execute
-  // at mediump or skip the loop entirely, leaving everything black except the
-  // built-in cardioid/bulb early-exit. If we see all-black pixels here we
-  // return null so callers fall back to the WASM/f64 CPU renderer.
+  // Runtime correctness checks using an offscreen 4×4 framebuffer.
+  //
+  // Check 1 — the iteration loop must run at all:
+  //   c = (2, 0) escapes in 5 iterations → pixels must be coloured.
+  //
+  // Check 2 — iteration must be numerically accurate:
+  //   c = (-1, 0.3) is inside the Mandelbrot set and lies outside the
+  //   cardioid/bulb early-exit zone, so the loop must run many times and
+  //   decide the orbit is bounded → pixels must be black.
+  //   GPUs that secretly execute highp shaders at mediump precision (common
+  //   on Adreno/Mali in Android browsers) accumulate rounding errors and
+  //   incorrectly escape this orbit, returning coloured pixels instead.
   {
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -161,24 +167,30 @@ export function createGpuRenderer(canvas) {
     const fbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    gl.viewport(0, 0, 4, 4);
-    // c ≈ (2, 0) — escapes at iteration 4, so colour must be non-black.
-    gl.uniform2f(uRes, 4, 4);
-    gl.uniform2f(uCenter, 2.0, 0.0);
-    gl.uniform1f(uScale, 0.001);
-    gl.uniform1i(uMaxIter, 50);
-    gl.uniform1i(uMode, 0);
-    gl.uniform2f(uJc, 0, 0);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    const px = new Uint8Array(4 * 4 * 4);
-    gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+    const probe = (cx, cy) => {
+      gl.viewport(0, 0, 4, 4);
+      gl.uniform2f(uRes, 4, 4);
+      gl.uniform2f(uCenter, cx, cy);
+      gl.uniform1f(uScale, 0.001);  // tiny scale → all pixels ≈ same point
+      gl.uniform1i(uMaxIter, 100);
+      gl.uniform1i(uMode, 0);
+      gl.uniform2f(uJc, 0, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      const px = new Uint8Array(4 * 4 * 4);
+      gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      // Returns true if any RGB channel (not alpha) is non-zero.
+      return px.some((v, i) => i % 4 !== 3 && v > 0);
+    };
+
+    const escapingIsColoured = probe(2.0, 0.0);   // must be true
+    const interiorIsBlack    = !probe(-1.0, 0.3);  // must be true
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.deleteFramebuffer(fbo);
     gl.deleteTexture(tex);
-    // Ignore alpha channel (index 3, 7, 11, …); all RGB channels must be zero
-    // for the render to be considered broken.
-    const allBlack = px.every((v, i) => i % 4 === 3 || v === 0);
-    if (allBlack) return null;
+
+    if (!escapingIsColoured || !interiorIsBlack) return null;
   }
 
   return {
