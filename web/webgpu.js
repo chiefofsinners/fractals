@@ -135,6 +135,18 @@ fn sample_at(fragxy: vec2f) -> vec3f {
     let lastZ = ref_orbit[u.ref_iters - 1u];
     var zx = lastZ.x + dzx;
     var zy = lastZ.y + dzy;
+    // The reference orbit was short because the *reference* escaped, not
+    // necessarily because this pixel did. If our true position |Z+dz| is
+    // already past bailout, we have nothing useful to fall back on (the
+    // pixel either tracked the reference out, in which case it should
+    // already have been caught by the perturbation-loop bailout, or it
+    // glitched apart from the reference). Either way, continuing in f32
+    // here from a > 256 magnitude would falsely escape in-set pixels and
+    // paint them bright. Treat them as in-set instead — black is the safe
+    // colour, and these pixels usually correct themselves once a fresh
+    // reference is computed on the next interaction-idle frame.
+    let initMag2 = zx * zx + zy * zy;
+    if (initMag2 <= 65536.0) {
     var cx: f32;
     var cy: f32;
     if (u.mode == 1u) {
@@ -164,6 +176,7 @@ fn sample_at(fragxy: vec2f) -> vec3f {
         zx = zx2 - zy2 + cx;
         zy = nzy;
       }
+    }
     }
   }
 
