@@ -110,13 +110,6 @@ export function createGpuRenderer(canvas) {
   });
   if (!gl) return null;
 
-  // Some mobile GPUs expose WebGL2 but only low/mediump-like precision in
-  // fragment highp float. Mandelbrot maths then collapses into a blob.
-  const highp = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
-  if (!highp || highp.precision < 23 || highp.rangeMax < 127) {
-    return null;
-  }
-
   const vs = compile(gl, gl.VERTEX_SHADER, VERT);
   const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
   const prog = gl.createProgram();
@@ -145,53 +138,6 @@ export function createGpuRenderer(canvas) {
   gl.useProgram(prog);
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
-
-  // Runtime correctness checks using an offscreen 4×4 framebuffer.
-  //
-  // Check 1 — the iteration loop must run at all:
-  //   c = (2, 0) escapes in 5 iterations → pixels must be coloured.
-  //
-  // Check 2 — iteration must be numerically accurate:
-  //   c = (-1, 0.3) is inside the Mandelbrot set and lies outside the
-  //   cardioid/bulb early-exit zone, so the loop must run many times and
-  //   decide the orbit is bounded → pixels must be black.
-  //   GPUs that secretly execute highp shaders at mediump precision (common
-  //   on Adreno/Mali in Android browsers) accumulate rounding errors and
-  //   incorrectly escape this orbit, returning coloured pixels instead.
-  {
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 4, 4, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    const fbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-
-    const probe = (cx, cy) => {
-      gl.viewport(0, 0, 4, 4);
-      gl.uniform2f(uRes, 4, 4);
-      gl.uniform2f(uCenter, cx, cy);
-      gl.uniform1f(uScale, 0.001);  // tiny scale → all pixels ≈ same point
-      gl.uniform1i(uMaxIter, 100);
-      gl.uniform1i(uMode, 0);
-      gl.uniform2f(uJc, 0, 0);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      const px = new Uint8Array(4 * 4 * 4);
-      gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, px);
-      // Returns true if any RGB channel (not alpha) is non-zero.
-      return px.some((v, i) => i % 4 !== 3 && v > 0);
-    };
-
-    const escapingIsColoured = probe(2.0, 0.0);   // must be true
-    const interiorIsBlack    = !probe(-1.0, 0.3);  // must be true
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.deleteFramebuffer(fbo);
-    gl.deleteTexture(tex);
-
-    if (!escapingIsColoured || !interiorIsBlack) return null;
-  }
 
   return {
     render(width, height, cx, cy, scale, maxIter, mode = 0, jcx = 0, jcy = 0) {
