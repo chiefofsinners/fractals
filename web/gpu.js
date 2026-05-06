@@ -146,6 +146,41 @@ export function createGpuRenderer(canvas) {
   gl.enableVertexAttribArray(aPos);
   gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
+  // Runtime correctness check: render c=(2,0) to an offscreen 4×4 FBO.
+  // That point escapes in ~4 iterations and must produce a coloured pixel.
+  // Some Android GPUs (Adreno, Mali) claim highp support but silently execute
+  // at mediump or skip the loop entirely, leaving everything black except the
+  // built-in cardioid/bulb early-exit. If we see all-black pixels here we
+  // return null so callers fall back to the WASM/f64 CPU renderer.
+  {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 4, 4, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.viewport(0, 0, 4, 4);
+    // c ≈ (2, 0) — escapes at iteration 4, so colour must be non-black.
+    gl.uniform2f(uRes, 4, 4);
+    gl.uniform2f(uCenter, 2.0, 0.0);
+    gl.uniform1f(uScale, 0.001);
+    gl.uniform1i(uMaxIter, 50);
+    gl.uniform1i(uMode, 0);
+    gl.uniform2f(uJc, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const px = new Uint8Array(4 * 4 * 4);
+    gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(tex);
+    // Ignore alpha channel (index 3, 7, 11, …); all RGB channels must be zero
+    // for the render to be considered broken.
+    const allBlack = px.every((v, i) => i % 4 === 3 || v === 0);
+    if (allBlack) return null;
+  }
+
   return {
     render(width, height, cx, cy, scale, maxIter, mode = 0, jcx = 0, jcy = 0) {
       if (canvas.width !== width || canvas.height !== height) {
