@@ -496,19 +496,27 @@
       (function () {
         const toggle = document.getElementById('controlsToggle');
         const controls = document.getElementById('controls');
+        const reset = document.getElementById('reset');
         if (!toggle) return;
+
+        function closePanel() {
+          controls.classList.remove('open');
+          toggle.setAttribute('aria-expanded', 'false');
+          controls.querySelectorAll('.csel[data-open]').forEach(function (c) {
+            delete c.dataset.open;
+            c.querySelector('.csel__trigger').setAttribute('aria-expanded', 'false');
+          });
+        }
+
         toggle.addEventListener('click', function (e) {
           e.stopPropagation(); // prevent the outside-click handler from immediately closing it
           const open = controls.classList.toggle('open');
           toggle.setAttribute('aria-expanded', String(open));
           if (!open) {
-            // Close any open dropdowns inside the panel
-            controls.querySelectorAll('.csel[data-open]').forEach(function (c) {
-              delete c.dataset.open;
-              c.querySelector('.csel__trigger').setAttribute('aria-expanded', 'false');
-            });
+            closePanel();
           }
         });
+        if (reset) reset.addEventListener('click', closePanel);
         // Also stop clicks inside the panel from bubbling to the outside-click handler
         controls.addEventListener('click', function (e) { e.stopPropagation(); });
       })();
